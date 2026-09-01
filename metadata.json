@@ -1,0 +1,8 @@
+{
+  "name": "Academic Research & Writing Studio",
+  "description": "A scholarly writing workspace featuring rubric parsing, Semantic Scholar literature search, citation pooling, cross-referenced outlining, in-text citation triggers, strict rubric proofreading, and Word export.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
