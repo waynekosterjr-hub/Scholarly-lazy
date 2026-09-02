@@ -1,0 +1,32 @@
+{
+  "entities": {
+    "Paper": {
+      "title": "Paper",
+      "description": "A user academic paper project including draft content, rubric, references, and outline.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Unique paper identifier" },
+        "userId": { "type": "string", "description": "Owner user UID" },
+        "title": { "type": "string", "description": "Paper title", "maxLength": 300 },
+        "courseName": { "type": "string", "description": "Course or subject name", "maxLength": 200 },
+        "content": { "type": "string", "description": "Markdown and body text of the document" },
+        "citationStyle": { "type": "string", "description": "Citation style (APA7, MLA9, CHICAGO, IEEE, HARVARD)", "maxLength": 20 },
+        "studentDirection": { "type": "string", "description": "Central thesis or student instructions" },
+        "wordCount": { "type": "number", "description": "Word count of the current draft" },
+        "rubric": { "type": "object", "description": "Rubric constraints and criteria" },
+        "references": { "type": "array", "description": "Selected peer-reviewed reference pool papers" },
+        "outline": { "type": "array", "description": "Structured outline sections" },
+        "progressionSteps": { "type": "array", "description": "Integrity and reasoning progression log steps" },
+        "createdAt": { "type": "string", "description": "ISO timestamp of creation" },
+        "updatedAt": { "type": "string", "description": "ISO timestamp of last update" }
+      },
+      "required": ["userId", "title"]
+    }
+  },
+  "firestore": {
+    "/papers/{paperId}": {
+      "schema": "Paper",
+      "description": "User academic paper workspace documents"
+    }
+  }
+}

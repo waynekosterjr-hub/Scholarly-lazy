@@ -109,7 +109,7 @@ Return a list of 6-8 authentic, well-cited scholarly academic journal articles a
 Include realistic authors, publication years, thorough academic abstracts explaining methodology and findings, realistic citation counts, and journal venues.`;
 
     const fallbackResponse = await generateContentWithRetry({
-      model: 'gemini-3.6-flash',
+      model: 'gemini-3.5-flash',
       contents: prompt,
       config: {
         responseMimeType: 'application/json',
@@ -151,7 +151,63 @@ Include realistic authors, publication years, thorough academic abstracts explai
   }
 });
 
-// 2. Ingestion & Rubric Extraction (Text, Image/OCR, PDF)
+// 1b. Context-Aware Literature Query Suggestions (Based on Center Document & Left Rubric)
+app.post('/api/scholarly/suggest-topics', async (req, res) => {
+  try {
+    const { documentText, rubric, studentDirection } = req.body;
+
+    const rubricContext = rubric
+      ? `Assignment: "${rubric.title || ''}" (${rubric.assignmentType || ''})\nTopic Constraints: ${(rubric.topicConstraints || []).join('; ')}\nKey Questions: ${(rubric.keyQuestionsToAnswer || []).join('; ')}\nCriteria: ${(rubric.criteria || []).map((c: any) => c.category).join(', ')}`
+      : 'General Academic Inquiry';
+
+    const docExcerpt = (documentText || '').slice(0, 3000);
+
+    const prompt = `You are a research librarian and literature assistant.
+Given the student's paper text (Center Panel) and Assignment Rubric & Rules (Left Panel), generate 5-6 highly specific, high-yield academic search queries that would discover top peer-reviewed empirical studies, seminal literature, and counter-arguments in Semantic Scholar.
+
+Rubric & Constraints:
+${rubricContext}
+
+Student's Direction / Thesis:
+"${studentDirection || 'Develop empirical analysis'}"
+
+Current Paper Draft Snippet:
+"""
+${docExcerpt || 'No draft written yet. Generate foundational literature queries based on the rubric.'}
+"""
+
+Instructions:
+- Return 5-6 short, targeted academic keyword search queries (3 to 6 words each, e.g. "prefrontal cortex screen time fMRI", "working memory media multitasking meta-analysis").
+- Ensure queries directly reflect key themes in the center draft and rubric criteria.`;
+
+    const response = await generateContentWithRetry({
+      model: 'gemini-3.5-flash',
+      contents: prompt,
+      config: {
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.ARRAY,
+          items: {
+            type: Type.OBJECT,
+            properties: {
+              query: { type: Type.STRING },
+              label: { type: Type.STRING, description: 'Short badge label (e.g. "Working Memory", "Neuroimaging")' },
+              rationale: { type: Type.STRING, description: 'Why this query is relevant' },
+            },
+            required: ['query', 'label'],
+          },
+        },
+      },
+    });
+
+    const suggestions = JSON.parse(response.text || '[]');
+    return res.json({ suggestions });
+  } catch (error: any) {
+    console.error('Error in /api/scholarly/suggest-topics:', error);
+    return res.status(500).json({ error: 'Failed to generate suggestions' });
+  }
+});
+
 app.post('/api/rubric/extract', async (req, res) => {
   try {
     const { rawText, imageBase64, imageMimeType, pdfBase64 } = req.body;
@@ -200,7 +256,7 @@ Ensure that:
     }
 
     const response = await generateContentWithRetry({
-      model: 'gemini-3.6-flash',
+      model: 'gemini-3.5-flash',
       contents,
       config: {
         systemInstruction: systemPrompt,
@@ -331,7 +387,7 @@ For each section and subpoint:
 3. Assign target word counts per section that sum up to approximately ${rubric?.requiredWordCount?.target || 2000} words.`;
 
     const response = await generateContentWithRetry({
-      model: 'gemini-3.6-flash',
+      model: 'gemini-3.5-flash',
       contents: prompt,
       config: {
         responseMimeType: 'application/json',
@@ -412,7 +468,7 @@ Instructions:
 4. Return ONLY the drafted prose for this section (with standard paragraph breaks, no markdown meta commentaries).`;
 
     const response = await generateContentWithRetry({
-      model: 'gemini-3.6-flash',
+      model: 'gemini-3.5-flash',
       contents: prompt,
     });
 
@@ -461,7 +517,7 @@ Perform a comprehensive academic review:
 6. Analyze word count against the required bounds.`;
 
     const response = await generateContentWithRetry({
-      model: 'gemini-3.6-flash',
+      model: 'gemini-3.5-flash',
       contents: prompt,
       config: {
         responseMimeType: 'application/json',
@@ -572,7 +628,7 @@ app.post('/api/editor/assist', async (req, res) => {
     }
 
     const response = await generateContentWithRetry({
-      model: 'gemini-3.6-flash',
+      model: 'gemini-3.5-flash',
       contents: prompt,
     });
 
@@ -582,6 +638,168 @@ app.post('/api/editor/assist', async (req, res) => {
     res.status(500).json({ error: error.message || 'Failed to process editor assistance' });
   }
 });
+
+// 7. Document Import & Source Identification with AI Analysis & Rubric Alignment
+app.post('/api/document/analyze-import', async (req, res) => {
+  try {
+    const { documentText, rubric, studentDirection } = req.body;
+
+    if (!documentText || documentText.trim().length < 15) {
+      return res.status(400).json({ error: 'Document text is too short for analysis.' });
+    }
+
+    const hasRubric = !!(rubric && rubric.criteria && rubric.criteria.length > 0);
+
+    const prompt = `You are an expert academic evaluator, literature indexer, and research director.
+Analyze the following student document text.
+
+Student Document:
+"""
+${documentText}
+"""
+
+${
+  hasRubric
+    ? `Rubric & Assignment Criteria Provided:
+- Title: ${rubric.title || 'Assignment'}
+- Target Word Count: ${rubric.requiredWordCount?.target || 'Not specified'} (Range: ${rubric.requiredWordCount?.min || 0} - ${rubric.requiredWordCount?.max || 0})
+- Citation Style: ${rubric.requiredCitationStyle || 'APA7'}
+- Required Sources: ${rubric.requiredSourceCount || 4}
+- Criteria Breakdown:
+${(rubric.criteria || []).map((c: any) => `- [${c.id}] ${c.category} (${c.weight}%): ${c.description}. Guidelines: ${(c.guidelines || []).join(', ')}`).join('\n')}
+- Key Questions: ${(rubric.keyQuestionsToAnswer || []).join('; ')}`
+    : `Note: NO SPECIFIC RUBRIC OR DIRECTIONS WERE PROVIDED BY THE USER.
+Perform an objective evaluation based on universal university scholarly writing standards (clarity of thesis, depth of scholarly evidence, structure, academic tone, citation integrity). Explicitly note the absence of a rubric.`
+}
+
+Tasks:
+1. Extract Title & Title Page Fields: Infer or extract the main paper title, and check the title page / header / introductory lines for:
+   - paperTitle: The exact or inferred paper title.
+   - authorName: Author or student researcher name.
+   - courseName: Course code or name (e.g. "PSYC 4020: Advanced Developmental Cognitive Neuroscience").
+   - institution: Academic department or university affiliation (e.g. "Department of Psychology, University of California").
+   - instructorName: Instructor or professor name (e.g. "Prof. Eleanor Vance, Ph.D.").
+   - dueDate: Date or semester mentioned.
+2. Identify All Sources & In-Text Citations Used: Scan the text for every cited paper, author name, parenthetical or narrative citation (e.g. "Smith et al. (2022)", "(Johnson, 2021)"), or bibliography entries at the end. For each, extract the paper title (or infer topic/title), author names, year, venue, occurrence count, and raw citation.
+3. ${
+  hasRubric
+    ? `Rubric Alignment: Grade how well the document fulfills each rubric criterion ('strong', 'moderate', 'weak', or 'missing') with evidence snippets and recommendations.`
+    : `General Academic Alignment: Evaluate standard academic dimensions (Thesis, Evidence, Critical Nuance, Style).`
+}
+4. Overall Evaluation: Executive summary, key strengths, critical gaps, immediate actionable recommendations, and estimated grade band.`;
+
+    const response = await generateContentWithRetry({
+      model: 'gemini-3.5-flash',
+      contents: prompt,
+      config: {
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            extractedTitle: { type: Type.STRING },
+            titlePageMetadata: {
+              type: Type.OBJECT,
+              properties: {
+                paperTitle: { type: Type.STRING },
+                authorName: { type: Type.STRING },
+                courseName: { type: Type.STRING },
+                institution: { type: Type.STRING },
+                instructorName: { type: Type.STRING },
+                dueDate: { type: Type.STRING },
+              },
+            },
+            wordCount: { type: Type.INTEGER },
+            identifiedSources: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  paperTitle: { type: Type.STRING },
+                  authors: {
+                    type: Type.ARRAY,
+                    items: { type: Type.STRING },
+                  },
+                  year: { type: Type.INTEGER },
+                  inTextOccurrences: { type: Type.INTEGER },
+                  rawCitation: { type: Type.STRING },
+                  venue: { type: Type.STRING },
+                },
+                required: ['paperTitle', 'authors', 'rawCitation'],
+              },
+            },
+            rubricFound: { type: Type.BOOLEAN },
+            rubricAlignment: {
+              type: Type.OBJECT,
+              properties: {
+                alignmentScore: { type: Type.INTEGER, description: 'Percentage 0-100' },
+                matchedCriteria: {
+                  type: Type.ARRAY,
+                  items: {
+                    type: Type.OBJECT,
+                    properties: {
+                      criterionTitle: { type: Type.STRING },
+                      status: { type: Type.STRING, description: 'strong, moderate, weak, or missing' },
+                      evidenceSnippet: { type: Type.STRING },
+                      recommendation: { type: Type.STRING },
+                    },
+                    required: ['criterionTitle', 'status', 'evidenceSnippet', 'recommendation'],
+                  },
+                },
+              },
+              required: ['alignmentScore', 'matchedCriteria'],
+            },
+            overallEvaluation: {
+              type: Type.OBJECT,
+              properties: {
+                executiveSummary: { type: Type.STRING },
+                strengths: {
+                  type: Type.ARRAY,
+                  items: { type: Type.STRING },
+                },
+                criticalGaps: {
+                  type: Type.ARRAY,
+                  items: { type: Type.STRING },
+                },
+                immediateActionItems: {
+                  type: Type.ARRAY,
+                  items: { type: Type.STRING },
+                },
+                estimatedGradeBand: { type: Type.STRING },
+              },
+              required: ['executiveSummary', 'strengths', 'criticalGaps', 'immediateActionItems'],
+            },
+          },
+          required: ['identifiedSources', 'rubricFound', 'overallEvaluation'],
+        },
+      },
+    });
+
+    const parsedData = JSON.parse(response.text || '{}');
+
+    // Also convert identified sources into ScholarlyPaper format for direct reference pool import
+    const extractedPapers = (parsedData.identifiedSources || []).map((s: any, idx: number) => ({
+      paperId: `imported-${Date.now()}-${idx + 1}`,
+      title: s.paperTitle || `Cited Reference (${(s.authors || []).join(', ')}, ${s.year || 'n.d.'})`,
+      authors: (s.authors || ['Anonymous']).map((name: string) => ({ name })),
+      year: s.year || new Date().getFullYear(),
+      abstract: `Source identified from imported document: "${s.rawCitation}" (Cited ${s.inTextOccurrences || 1} time(s)).`,
+      venue: s.venue || 'Academic Reference',
+      selected: true,
+    }));
+
+    return res.json({
+      analysis: {
+        ...parsedData,
+        rubricFound: hasRubric,
+      },
+      extractedPapers,
+    });
+  } catch (error: any) {
+    console.error('Error in /api/document/analyze-import:', error);
+    res.status(500).json({ error: error.message || 'Failed to analyze imported document' });
+  }
+});
+
 
 // Vite middleware setup
 async function startServer() {

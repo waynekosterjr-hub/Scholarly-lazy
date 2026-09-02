@@ -111,45 +111,75 @@ export async function generateDocxBlob(options: DocxExportOptions): Promise<Blob
     );
   }
 
-  // 2. Main Content Heading
-  paragraphs.push(
-    new Paragraph({
-      alignment: AlignmentType.CENTER,
-      children: [
-        new TextRun({
-          text: title,
-          bold: true,
-          size: 24,
-          font: 'Times New Roman',
-        }),
-      ],
-      spacing: { after: 300 },
-    })
-  );
-
-  // 3. Process Content Lines
+  // 3. Process Content Lines & Handle Title & Page Breaks
   const lines = content.split('\n');
+  let firstHeadingFound = false;
+
+  // Check if content already starts with an H1 title
+  const firstNonEmpty = lines.find((l) => l.trim().length > 0)?.trim() || '';
+  const contentHasMainTitle = firstNonEmpty.startsWith('# ') && !firstNonEmpty.startsWith('## ');
+
+  // 2. Main Content Heading (only if content doesn't already provide its own # H1 title)
+  if (!contentHasMainTitle) {
+    paragraphs.push(
+      new Paragraph({
+        alignment: AlignmentType.CENTER,
+        children: [
+          new TextRun({
+            text: title,
+            bold: true,
+            size: 24,
+            font: 'Times New Roman',
+          }),
+        ],
+        spacing: { after: 300 },
+      })
+    );
+  }
+
   for (const line of lines) {
     const trimmed = line.trim();
     if (!trimmed) {
       continue;
     }
 
-    // Check if line is a Heading 1 (# Heading or HEADING)
-    if (trimmed.startsWith('# ')) {
+    // Check for explicit or manual page break markers (convert to real Word PageBreak instead of text)
+    if (
+      trimmed.match(/^[-—=*_~#\s]*page\s*break[-—=*_~#\s]*$/i) ||
+      trimmed === '---' ||
+      trimmed === '***' ||
+      trimmed === '===' ||
+      trimmed === '---pagebreak---' ||
+      trimmed === '\f'
+    ) {
+      paragraphs.push(
+        new Paragraph({
+          children: [new PageBreak()],
+        })
+      );
+      continue;
+    }
+
+    // Check if line is a Heading 1 (# Heading)
+    if (trimmed.startsWith('# ') && !trimmed.startsWith('## ')) {
+      const headingText = trimmed.replace(/^#\s+/, '');
+      // If this is the very first H1, center it as the main title
+      const isFirst = !firstHeadingFound;
+      firstHeadingFound = true;
+
       paragraphs.push(
         new Paragraph({
           heading: HeadingLevel.HEADING_1,
-          alignment: AlignmentType.CENTER,
+          alignment: isFirst ? AlignmentType.CENTER : AlignmentType.LEFT,
           children: [
             new TextRun({
-              text: trimmed.replace(/^#\s+/, ''),
+              text: headingText,
               bold: true,
               size: 24,
               font: 'Times New Roman',
             }),
           ],
-          spacing: { before: 300, after: 200 },
+          spacing: { before: isFirst ? 0 : 300, after: 200 },
         })
       );
     } else if (trimmed.startsWith('## ')) {

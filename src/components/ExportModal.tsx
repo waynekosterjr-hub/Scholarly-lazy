@@ -11,7 +11,7 @@ import {
   Layers,
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
-import { AssignmentRubric, ScholarlyPaper, CitationStyle } from '../types';
+import { AssignmentRubric, ScholarlyPaper, CitationStyle, TitlePageConfig } from '../types';
 import { generateDocxBlob } from '../utils/docxExport';
 import { formatFullReference } from '../utils/citationFormatter';
 
@@ -22,6 +22,8 @@ interface ExportModalProps {
   rubric: AssignmentRubric | null;
   references: ScholarlyPaper[];
   citationStyle: CitationStyle;
+  titlePageConfig?: TitlePageConfig;
+  onUpdateTitlePageConfig?: (config: TitlePageConfig) => void;
 }
 
 export const ExportModal: React.FC<ExportModalProps> = ({
@@ -31,13 +33,49 @@ export const ExportModal: React.FC<ExportModalProps> = ({
   rubric,
   references,
   citationStyle,
+  titlePageConfig,
+  onUpdateTitlePageConfig,
 }) => {
-  const [authorName, setAuthorName] = useState('Jane Doe');
-  const [institution, setInstitution] = useState('Department of Psychology, University of California');
-  const [instructorName, setInstructorName] = useState('Prof. Eleanor Vance, Ph.D.');
-  const [courseName, setCourseName] = useState(rubric?.courseName || 'PSYC 4020: Cognitive Neuroscience');
-  const [includeTitlePage, setIncludeTitlePage] = useState(true);
+  const [authorName, setAuthorName] = useState(titlePageConfig?.authorName || 'Jane Doe');
+  const [institution, setInstitution] = useState(
+    titlePageConfig?.institution || 'Department of Psychology, University of California'
+  );
+  const [instructorName, setInstructorName] = useState(
+    titlePageConfig?.instructorName || 'Prof. Eleanor Vance, Ph.D.'
+  );
+  const [courseName, setCourseName] = useState(
+    titlePageConfig?.courseName || rubric?.courseName || 'PSYC 4020: Advanced Developmental Cognitive Neuroscience'
+  );
+  const [includeTitlePage, setIncludeTitlePage] = useState(
+    titlePageConfig?.includeTitlePage ?? true
+  );
   const [isExporting, setIsExporting] = useState(false);
+
+  // Sync state whenever titlePageConfig changes
+  React.useEffect(() => {
+    if (titlePageConfig) {
+      if (titlePageConfig.authorName) setAuthorName(titlePageConfig.authorName);
+      if (titlePageConfig.institution) setInstitution(titlePageConfig.institution);
+      if (titlePageConfig.instructorName) setInstructorName(titlePageConfig.instructorName);
+      if (titlePageConfig.courseName) setCourseName(titlePageConfig.courseName);
+      if (titlePageConfig.includeTitlePage !== undefined) setIncludeTitlePage(titlePageConfig.includeTitlePage);
+    } else if (rubric?.courseName) {
+      setCourseName(rubric.courseName);
+    }
+  }, [titlePageConfig, rubric?.courseName]);
+
+  const updateConfig = (updates: Partial<TitlePageConfig>) => {
+    if (onUpdateTitlePageConfig) {
+      onUpdateTitlePageConfig({
+        authorName,
+        institution,
+        instructorName,
+        courseName,
+        includeTitlePage,
+        ...updates,
+      });
+    }
+  };
 
   if (!isOpen) return null;
 
@@ -92,6 +130,11 @@ export const ExportModal: React.FC<ExportModalProps> = ({
       .map((r, idx) => `<p class="ref-item">${formatFullReference(r, citationStyle, idx)}</p>`)
       .join('\n');
 
+    // Check if document already has an H1 heading
+    const docLines = documentContent.split('\n');
+    const firstNonEmpty = docLines.find((l) => l.trim().length > 0)?.trim() || '';
+    const hasExistingH1 = firstNonEmpty.startsWith('# ') && !firstNonEmpty.startsWith('## ');
+
     const html = `
       <!DOCTYPE html>
       <html>
@@ -142,6 +185,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
           }
           .page-break {
             page-break-before: always;
+            break-before: page;
           }
           .references-title {
             font-weight: bold;
@@ -175,14 +219,24 @@ export const ExportModal: React.FC<ExportModalProps> = ({
             : ''
         }
 
-        <h1>${title}</h1>
+        ${!hasExistingH1 ? `<h1>${title}</h1>` : ''}
         <div>
           ${documentContent
             .split('\n')
             .map((line) => {
               const trimmed = line.trim();
               if (!trimmed) return '';
-              if (trimmed.startsWith('# ')) return `<h1>${trimmed.replace(/^#\s+/, '')}</h1>`;
+              if (
+                trimmed.match(/^[-—=*_~#\s]*page\s*break[-—=*_~#\s]*$/i) ||
+                trimmed === '---' ||
+                trimmed === '***' ||
+                trimmed === '===' ||
+                trimmed === '---pagebreak---' ||
+                trimmed === '\f'
+              ) {
+                return '<div class="page-break"></div>';
+              }
+              if (trimmed.startsWith('# ') && !trimmed.startsWith('## ')) return `<h1>${trimmed.replace(/^#\s+/, '')}</h1>`;
               if (trimmed.startsWith('## ')) return `<h2>${trimmed.replace(/^##\s+/, '')}</h2>`;
               return `<p>${trimmed}</p>`;
             })
@@ -241,10 +295,10 @@ export const ExportModal: React.FC<ExportModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[#F3F3F3] dark:bg-[#121212]/80 backdrop-blur-sm animate-in fade-in duration-150">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-in fade-in duration-200">
       <div className="bg-white dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded-xl shadow-2xl w-full max-w-2xl max-h-[90vh] flex flex-col text-[#1C1C1C] dark:text-gray-100 overflow-hidden">
         {/* Header */}
-        <div className="px-6 py-4 bg-[#F3F3F3] dark:bg-[#121212]/90 border-b border-gray-200 dark:border-gray-800 flex items-center justify-between">
+        <div className="px-6 py-4 bg-[#F8F9FA] dark:bg-[#161616] border-b border-gray-200 dark:border-gray-800 flex items-center justify-between">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 rounded-lg bg-blue-600/20 border border-blue-200 flex items-center justify-center text-[#0078D4]">
               <Download className="w-6 h-6" />
@@ -293,7 +347,10 @@ export const ExportModal: React.FC<ExportModalProps> = ({
                   <input
                     type="text"
                     value={authorName}
-                    onChange={(e) => setAuthorName(e.target.value)}
+                    onChange={(e) => {
+                      setAuthorName(e.target.value);
+                      updateConfig({ authorName: e.target.value });
+                    }}
                     className="w-full px-3 py-1.5 bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded text-gray-800 dark:text-gray-100 text-xs focus:outline-none focus:border-blue-500"
                   />
                 </div>
@@ -304,7 +361,10 @@ export const ExportModal: React.FC<ExportModalProps> = ({
                   <input
                     type="text"
                     value={courseName}
-                    onChange={(e) => setCourseName(e.target.value)}
+                    onChange={(e) => {
+                      setCourseName(e.target.value);
+                      updateConfig({ courseName: e.target.value });
+                    }}
                     className="w-full px-3 py-1.5 bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded text-gray-800 dark:text-gray-100 text-xs focus:outline-none focus:border-blue-500"
                   />
                 </div>
@@ -315,7 +375,10 @@ export const ExportModal: React.FC<ExportModalProps> = ({
                   <input
                     type="text"
                     value={institution}
-                    onChange={(e) => setInstitution(e.target.value)}
+                    onChange={(e) => {
+                      setInstitution(e.target.value);
+                      updateConfig({ institution: e.target.value });
+                    }}
                     className="w-full px-3 py-1.5 bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded text-gray-800 dark:text-gray-100 text-xs focus:outline-none focus:border-blue-500"
                   />
                 </div>
@@ -326,7 +389,10 @@ export const ExportModal: React.FC<ExportModalProps> = ({
                   <input
                     type="text"
                     value={instructorName}
-                    onChange={(e) => setInstructorName(e.target.value)}
+                    onChange={(e) => {
+                      setInstructorName(e.target.value);
+                      updateConfig({ instructorName: e.target.value });
+                    }}
                     className="w-full px-3 py-1.5 bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded text-gray-800 dark:text-gray-100 text-xs focus:outline-none focus:border-blue-500"
                   />
                 </div>

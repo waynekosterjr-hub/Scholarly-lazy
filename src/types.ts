@@ -98,7 +98,83 @@ export interface ReviewFeedback {
 export interface ProgressionStep {
   id: string;
   timestamp: string;
-  stage: 'Rubric Ingestion' | 'Scholarly Research' | 'Outline Synthesis' | 'Drafting' | 'Academic Review';
+  stage: 'Rubric Ingestion' | 'Scholarly Research' | 'Outline Synthesis' | 'Drafting' | 'Academic Review' | 'Project Loaded' | 'Workspace Initialized' | 'AI Import Analysis';
   summary: string;
   details: string;
 }
+
+export interface SavedPaper {
+  id: string;
+  userId: string;
+  title: string;
+  courseName?: string;
+  content: string;
+  citationStyle: CitationStyle;
+  studentDirection: string;
+  wordCount: number;
+  rubric: AssignmentRubric | null;
+  references: ScholarlyPaper[];
+  outline: OutlineSection[];
+  progressionSteps: ProgressionStep[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface IdentifiedCitation {
+  rawText: string;
+  authorLastName: string;
+  year?: number | string;
+  matchedPaperId?: string;
+  confidence: 'high' | 'medium' | 'low';
+}
+
+export interface TitlePageConfig {
+  authorName: string;
+  institution: string;
+  instructorName: string;
+  courseName: string;
+  includeTitlePage: boolean;
+  paperTitle?: string;
+  dueDate?: string;
+}
+
+export interface ImportAnalysisResult {
+  extractedTitle?: string;
+  titlePageMetadata?: {
+    paperTitle?: string;
+    authorName?: string;
+    courseName?: string;
+    institution?: string;
+    instructorName?: string;
+    dueDate?: string;
+  };
+  wordCount: number;
+  identifiedSources: {
+    paperTitle: string;
+    authors: string[];
+    year?: number;
+    inTextOccurrences: number;
+    rawCitation: string;
+    venue?: string;
+  }[];
+  rubricFound: boolean;
+  rubricAlignment?: {
+    alignmentScore: number;
+    matchedCriteria: {
+      criterionTitle: string;
+      status: 'strong' | 'moderate' | 'weak' | 'missing';
+      evidenceSnippet: string;
+      recommendation: string;
+    }[];
+  };
+  overallEvaluation: {
+    executiveSummary: string;
+    strengths: string[];
+    criticalGaps: string[];
+    immediateActionItems: string[];
+    estimatedGradeBand?: string;
+  };
+}
+
+export type PanelState = 'collapsed' | 'normal' | 'expanded';
+
