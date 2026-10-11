@@ -1,3 +1,6 @@
+import { ExportOptions } from '../utils/documentLayout';
+import { ExportReadiness } from './ExportReadiness';
+import { loadStudentDetails, saveStudentDetails } from '../utils/exportReadiness';
 import React, { useState } from 'react';
 import {
   X,
@@ -13,7 +16,9 @@ import {
 import confetti from 'canvas-confetti';
 import { AssignmentRubric, ScholarlyPaper, CitationStyle, TitlePageConfig } from '../types';
 import { generateDocxBlob } from '../utils/docxExport';
-import { formatFullReference } from '../utils/citationFormatter';
+import { formatFullReference, sortReferences } from '../utils/citationFormatter';
+
+const PdfPreview = React.lazy(() => import('./PdfPreview'));
 
 interface ExportModalProps {
   isOpen: boolean;
@@ -24,6 +29,8 @@ interface ExportModalProps {
   citationStyle: CitationStyle;
   titlePageConfig?: TitlePageConfig;
   onUpdateTitlePageConfig?: (config: TitlePageConfig) => void;
+  onChangeContent?: (content: string) => void;
+  userId?: string;
 }
 
 export const ExportModal: React.FC<ExportModalProps> = ({
@@ -35,29 +42,41 @@ export const ExportModal: React.FC<ExportModalProps> = ({
   citationStyle,
   titlePageConfig,
   onUpdateTitlePageConfig,
+  onChangeContent,
+  userId,
 }) => {
-  const [authorName, setAuthorName] = useState(titlePageConfig?.authorName || 'Jane Doe');
+  const [authorName, setAuthorName] = useState(titlePageConfig?.authorName ?? '');
   const [institution, setInstitution] = useState(
-    titlePageConfig?.institution || 'Department of Psychology, University of California'
+    titlePageConfig?.institution ?? ''
   );
   const [instructorName, setInstructorName] = useState(
-    titlePageConfig?.instructorName || 'Prof. Eleanor Vance, Ph.D.'
+    titlePageConfig?.instructorName ?? ''
   );
   const [courseName, setCourseName] = useState(
-    titlePageConfig?.courseName || rubric?.courseName || 'PSYC 4020: Advanced Developmental Cognitive Neuroscience'
+    titlePageConfig?.courseName ?? rubric?.courseName ?? ''
   );
   const [includeTitlePage, setIncludeTitlePage] = useState(
     titlePageConfig?.includeTitlePage ?? true
   );
   const [isExporting, setIsExporting] = useState(false);
+  const [previewUrl, setPreviewUrl] = useState('');
+  const [detailsMessage, setDetailsMessage] = useState('');
+  const detailsRef = React.useRef<HTMLDivElement>(null);
+  React.useEffect(() => () => { if (previewUrl) URL.revokeObjectURL(previewUrl); }, [previewUrl]);
+  React.useEffect(() => { setPreviewUrl(''); }, [documentContent, titlePageConfig, references, citationStyle, isOpen]);
+  const exportOptions: ExportOptions = {
+    title: titlePageConfig?.paperTitle || rubric?.title || 'Academic Paper',
+    dateStr: titlePageConfig?.dueDate || '', authorName, institution, courseName,
+    instructorName, content: documentContent, references, citationStyle, includeTitlePage,
+  };
 
   // Sync state whenever titlePageConfig changes
   React.useEffect(() => {
     if (titlePageConfig) {
-      if (titlePageConfig.authorName) setAuthorName(titlePageConfig.authorName);
-      if (titlePageConfig.institution) setInstitution(titlePageConfig.institution);
-      if (titlePageConfig.instructorName) setInstructorName(titlePageConfig.instructorName);
-      if (titlePageConfig.courseName) setCourseName(titlePageConfig.courseName);
+      setAuthorName(titlePageConfig.authorName || '');
+      setInstitution(titlePageConfig.institution || '');
+      setInstructorName(titlePageConfig.instructorName || '');
+      setCourseName(titlePageConfig.courseName || '');
       if (titlePageConfig.includeTitlePage !== undefined) setIncludeTitlePage(titlePageConfig.includeTitlePage);
     } else if (rubric?.courseName) {
       setCourseName(rubric.courseName);
@@ -67,6 +86,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
   const updateConfig = (updates: Partial<TitlePageConfig>) => {
     if (onUpdateTitlePageConfig) {
       onUpdateTitlePageConfig({
+        ...titlePageConfig,
         authorName,
         institution,
         instructorName,
@@ -77,28 +97,34 @@ export const ExportModal: React.FC<ExportModalProps> = ({
     }
   };
 
+  const saveDetails = () => {
+    if (!userId) return;
+    try {
+      saveStudentDetails(userId, { authorName, institution, courseName, instructorName });
+      setDetailsMessage('Student and course details saved for this account on this device. Titles and due dates are not reused.');
+    } catch { setDetailsMessage('Could not save reusable details on this device. This paper still keeps its own details.'); }
+  };
+  const useDetails = () => {
+    const details = userId ? loadStudentDetails(userId) : null;
+    if (!details) { setDetailsMessage('No saved student/course details for this account on this device yet.'); return; }
+    setAuthorName(details.authorName); setInstitution(details.institution);
+    setCourseName(details.courseName); setInstructorName(details.instructorName);
+    updateConfig(details);
+    setDetailsMessage('Saved details applied. Check the course and instructor for this assignment.');
+  };
+
   if (!isOpen) return null;
 
   // 1. Export as Word (.docx)
   const handleExportDocx = async () => {
     try {
       setIsExporting(true);
-      const blob = await generateDocxBlob({
-        title: rubric?.title || 'Academic Research Essay',
-        authorName,
-        institution,
-        courseName,
-        instructorName,
-        content: documentContent,
-        references,
-        citationStyle,
-        includeTitlePage,
-      });
+      const blob = await generateDocxBlob(exportOptions);
 
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `${(rubric?.title || 'Academic_Paper').replace(/\s+/g, '_')}_APA7.docx`;
+      a.download = `${(titlePageConfig?.paperTitle || rubric?.title || 'Academic_Paper').replace(/\s+/g, '_')}_${citationStyle}.docx`;
       a.click();
       URL.revokeObjectURL(url);
 
@@ -111,175 +137,37 @@ export const ExportModal: React.FC<ExportModalProps> = ({
     }
   };
 
-  // 2. Export as PDF / Print
-  const handleExportPdf = () => {
-    const printWindow = window.open('', '_blank');
-    if (!printWindow) {
-      alert('Please allow popups to generate the print-ready PDF.');
-      return;
-    }
-
-    const title = rubric?.title || 'Academic Research Paper';
-    const sortedRefs = [...references].sort((a, b) => {
-      const nameA = (a.authors?.[0]?.name || a.title).toLowerCase();
-      const nameB = (b.authors?.[0]?.name || b.title).toLowerCase();
-      return nameA.localeCompare(nameB);
-    });
-
-    const refsHtml = sortedRefs
-      .map((r, idx) => `<p class="ref-item">${formatFullReference(r, citationStyle, idx)}</p>`)
-      .join('\n');
-
-    // Check if document already has an H1 heading
-    const docLines = documentContent.split('\n');
-    const firstNonEmpty = docLines.find((l) => l.trim().length > 0)?.trim() || '';
-    const hasExistingH1 = firstNonEmpty.startsWith('# ') && !firstNonEmpty.startsWith('## ');
-
-    const html = `
-      <!DOCTYPE html>
-      <html>
-      <head>
-        <title>${title}</title>
-        <style>
-          @page {
-            size: letter;
-            margin: 1in;
-          }
-          body {
-            font-family: 'Times New Roman', Times, serif;
-            font-size: 12pt;
-            line-height: 2;
-            color: #000;
-            margin: 0;
-            padding: 0;
-          }
-          .title-page {
-            text-align: center;
-            padding-top: 2.5in;
-            page-break-after: always;
-          }
-          .title {
-            font-weight: bold;
-            margin-bottom: 24pt;
-          }
-          .meta {
-            margin-bottom: 12pt;
-          }
-          h1 {
-            font-size: 12pt;
-            font-weight: bold;
-            text-align: center;
-            margin-top: 18pt;
-            margin-bottom: 12pt;
-          }
-          h2 {
-            font-size: 12pt;
-            font-weight: bold;
-            text-align: left;
-            margin-top: 18pt;
-            margin-bottom: 12pt;
-          }
-          p {
-            text-indent: 0.5in;
-            margin: 0;
-          }
-          .page-break {
-            page-break-before: always;
-            break-before: page;
-          }
-          .references-title {
-            font-weight: bold;
-            text-align: center;
-            margin-bottom: 18pt;
-          }
-          .ref-item {
-            text-indent: -0.5in;
-            padding-left: 0.5in;
-            margin-bottom: 12pt;
-          }
-        </style>
-      </head>
-      <body>
-        ${
-          includeTitlePage
-            ? `
-          <div class="title-page">
-            <div class="title">${title}</div>
-            <div class="meta">${authorName}</div>
-            <div class="meta">${institution}</div>
-            <div class="meta">${courseName}</div>
-            <div class="meta">${instructorName}</div>
-            <div class="meta">${new Date().toLocaleDateString('en-US', {
-              month: 'long',
-              day: 'numeric',
-              year: 'numeric',
-            })}</div>
-          </div>
-        `
-            : ''
-        }
-
-        ${!hasExistingH1 ? `<h1>${title}</h1>` : ''}
-        <div>
-          ${documentContent
-            .split('\n')
-            .map((line) => {
-              const trimmed = line.trim();
-              if (!trimmed) return '';
-              if (
-                trimmed.match(/^[-—=*_~#\s]*page\s*break[-—=*_~#\s]*$/i) ||
-                trimmed === '---' ||
-                trimmed === '***' ||
-                trimmed === '===' ||
-                trimmed === '---pagebreak---' ||
-                trimmed === '\f'
-              ) {
-                return '<div class="page-break"></div>';
-              }
-              if (trimmed.startsWith('# ') && !trimmed.startsWith('## ')) return `<h1>${trimmed.replace(/^#\s+/, '')}</h1>`;
-              if (trimmed.startsWith('## ')) return `<h2>${trimmed.replace(/^##\s+/, '')}</h2>`;
-              return `<p>${trimmed}</p>`;
-            })
-            .join('')}
-        </div>
-
-        ${
-          references.length > 0
-            ? `
-          <div class="page-break">
-            <div class="references-title">${citationStyle === 'MLA9' ? 'Works Cited' : 'References'}</div>
-            ${refsHtml}
-          </div>
-        `
-            : ''
-        }
-      </body>
-      </html>
-    `;
-
-    printWindow.document.write(html);
-    printWindow.document.close();
-    printWindow.focus();
-    setTimeout(() => {
-      printWindow.print();
-    }, 400);
-
-    confetti({ particleCount: 50, spread: 45, origin: { y: 0.6 } });
+  // Preview and download the same PDF bytes; browser print settings cannot alter them.
+  const handleExportPdf = async (preview = false) => {
+    setIsExporting(true);
+    try {
+      const response = await fetch('/api/export/pdf', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(exportOptions),
+      });
+      if (!response.ok) throw new Error('PDF generation failed. Please retry.');
+      const url = URL.createObjectURL(await response.blob());
+      if (preview) setPreviewUrl(url);
+      else {
+        const a = document.createElement('a'); a.href = url;
+        a.download = `${exportOptions.title.replace(/[^a-z0-9_-]+/gi, '_')}_${citationStyle}.pdf`;
+        a.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+      }
+    } catch (error) { alert(error instanceof Error ? error.message : 'PDF generation failed'); }
+    finally { setIsExporting(false); }
   };
 
   // 3. Export as Markdown / Plain Text
   const handleExportText = () => {
-    let fullText = `${rubric?.title || 'Academic Paper'}\n`;
+    let fullText = `${titlePageConfig?.paperTitle || rubric?.title || 'Academic Paper'}\n`;
     fullText += `Author: ${authorName}\n`;
     fullText += `Course: ${courseName}\n`;
-    fullText += `Date: ${new Date().toLocaleDateString()}\n\n`;
+    fullText += `Date: ${titlePageConfig?.dueDate || new Date().toLocaleDateString()}\n\n`;
     fullText += `${documentContent}\n\n`;
 
     if (references.length > 0) {
       fullText += `\n${citationStyle === 'MLA9' ? 'Works Cited' : 'References'}\n`;
       fullText += `======================================================\n`;
-      [...references]
-        .sort((a, b) => (a.authors?.[0]?.name || a.title).localeCompare(b.authors?.[0]?.name || b.title))
+      sortReferences(references, citationStyle)
         .forEach((r, idx) => {
           fullText += `${formatFullReference(r, citationStyle, idx)}\n\n`;
         });
@@ -289,7 +177,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `${(rubric?.title || 'Academic_Paper').replace(/\s+/g, '_')}.md`;
+    a.download = `${(titlePageConfig?.paperTitle || rubric?.title || 'Academic_Paper').replace(/\s+/g, '_')}.md`;
     a.click();
     URL.revokeObjectURL(url);
   };
@@ -319,22 +207,50 @@ export const ExportModal: React.FC<ExportModalProps> = ({
           </button>
         </div>
 
+        <div className="flex-1 overflow-y-auto">
+        <div className="px-6 pt-4 space-y-2">
+          <ExportReadiness options={exportOptions} onChangeContent={onChangeContent} onEditDetails={() => {
+            detailsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            detailsRef.current?.querySelector<HTMLInputElement>('input')?.focus({ preventScroll: true });
+          }} />
+          <p className="text-xs text-gray-600 dark:text-gray-300">Professor Review checks writing. Preview the export and verify student details, citations, and assignment requirements before submitting.</p>
+          {/\[Evidence needed\s*:/i.test(documentContent) && <p role="alert" className="text-sm text-amber-700 dark:text-amber-400">Unresolved evidence gaps remain. Find supporting sources and revise each [Evidence needed: ...] passage before submitting. These markers will remain in the export.</p>}
+          <button type="button" disabled={isExporting} onClick={() => handleExportPdf(true)} className="text-sm text-blue-600 underline disabled:opacity-50">{isExporting ? 'Preparing document...' : 'Preview exported pages'}</button>
+          {previewUrl && <React.Suspense fallback={<p>Rendering pages…</p>}><PdfPreview url={previewUrl} /></React.Suspense>}
+        </div>
         {/* Body */}
         <div className="flex-1 overflow-y-auto p-6 space-y-6 text-xs">
           {/* Metadata Customization for Title Page */}
-          <div className="p-4 rounded-xl bg-gray-100 dark:bg-gray-800/60 border border-gray-300 dark:border-gray-700 space-y-3">
+          <div ref={detailsRef} className="p-4 rounded-xl bg-gray-100 dark:bg-gray-800/60 border border-gray-300 dark:border-gray-700 space-y-3">
             <div className="flex items-center justify-between">
               <h3 className="font-bold text-gray-800 dark:text-gray-100 text-xs uppercase tracking-wider">
-                Title Page Configuration ({citationStyle})
+                Document details ({citationStyle})
               </h3>
               <label className="flex items-center gap-2 cursor-pointer">
                 <input
                   type="checkbox"
                   checked={includeTitlePage}
-                  onChange={(e) => setIncludeTitlePage(e.target.checked)}
+                  onChange={(e) => { setIncludeTitlePage(e.target.checked); updateConfig({ includeTitlePage: e.target.checked }); }}
                   className="rounded border-gray-300 dark:border-gray-700 text-blue-600 focus:ring-0 cursor-pointer"
                 />
                 <span className="text-gray-700 dark:text-gray-200 text-xs">Include APA Title Page</span>
+              </label>
+            </div>
+
+            {userId && <div className="space-y-2">
+              <div className="flex flex-wrap gap-3">
+                <button type="button" onClick={saveDetails} className="text-blue-600 underline">Save student/course details for reuse</button>
+                <button type="button" onClick={useDetails} className="text-blue-600 underline">Use saved student/course details</button>
+              </div>
+              {detailsMessage && <p role="status">{detailsMessage}</p>}
+            </div>}
+
+            <div className="grid grid-cols-2 gap-3">
+              <label className="text-xs">Paper Title
+                <input aria-label="Paper Title" className="block w-full p-2 border rounded bg-transparent" value={titlePageConfig?.paperTitle || ''} onChange={e => updateConfig({ paperTitle: e.target.value })} />
+              </label>
+              <label className="text-xs">Due Date
+                <input aria-label="Due Date" className="block w-full p-2 border rounded bg-transparent" value={titlePageConfig?.dueDate || ''} onChange={e => updateConfig({ dueDate: e.target.value })} />
               </label>
             </div>
 
@@ -416,19 +332,20 @@ export const ExportModal: React.FC<ExportModalProps> = ({
                 <div>
                   <h4 className="font-bold text-[#1C1C1C] dark:text-gray-100 text-xs">Microsoft Word (.docx)</h4>
                   <p className="text-[11px] text-gray-600 dark:text-gray-300 mt-1">
-                    Standard APA 7: Times New Roman 12pt, double spaced, 1-inch margins, 0.5-inch hanging indent.
+                    12pt Times New Roman, double spacing, page numbers, 1-inch margins, and hanging references. Check assignment-specific requirements.
                   </p>
                 </div>
               </div>
               <span className="mt-4 inline-flex items-center gap-1 text-[11px] font-semibold text-[#0078D4] group-hover:text-[#0078D4]">
-                {isExporting ? 'Compiling Word...' : 'Download .docx →'}
+                {isExporting ? 'Compiling Word...' : 'Download .docx'}
               </span>
             </button>
 
             {/* PDF Option */}
             <button
               type="button"
-              onClick={handleExportPdf}
+              onClick={() => handleExportPdf()}
+              disabled={isExporting}
               className="p-4 rounded-xl bg-gray-100 dark:bg-gray-800/60 hover:bg-gray-100 dark:hover:bg-gray-800 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 text-left transition flex flex-col justify-between group"
             >
               <div className="space-y-2">
@@ -438,12 +355,12 @@ export const ExportModal: React.FC<ExportModalProps> = ({
                 <div>
                   <h4 className="font-bold text-[#1C1C1C] dark:text-gray-100 text-xs">Print-Ready PDF</h4>
                   <p className="text-[11px] text-gray-600 dark:text-gray-300 mt-1">
-                    Formatted letter size with running head, clean typography, and page breaks.
+                    Letter size, numbered pages, consistent spacing, and no browser headers or footers.
                   </p>
                 </div>
               </div>
               <span className="mt-4 inline-flex items-center gap-1 text-[11px] font-semibold text-purple-400 group-hover:text-purple-300">
-                Print / Save PDF →
+                Download .pdf
               </span>
             </button>
 
@@ -460,17 +377,18 @@ export const ExportModal: React.FC<ExportModalProps> = ({
                 <div>
                   <h4 className="font-bold text-[#1C1C1C] dark:text-gray-100 text-xs">Markdown / Text (.md)</h4>
                   <p className="text-[11px] text-gray-600 dark:text-gray-300 mt-1">
-                    Clean plain-text formatting with appended APA bibliographic entries.
+                    Editable Markdown with references in the selected citation style.
                   </p>
                 </div>
               </div>
               <span className="mt-4 inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-600 group-hover:text-emerald-700">
-                Download .md →
+                Download .md
               </span>
             </button>
           </div>
         </div>
 
+        </div>
         {/* Footer */}
         <div className="px-6 py-3 bg-[#F3F3F3] dark:bg-[#121212]/90 border-t border-gray-200 dark:border-gray-800 flex items-center justify-between">
           <p className="text-[11px] text-gray-500 dark:text-gray-400">

@@ -1,3 +1,4 @@
+import { aiFetch } from '../lib/aiApi';
 import React, { useState, useRef } from 'react';
 import {
   UploadCloud,
@@ -53,49 +54,26 @@ export const ImportModal: React.FC<ImportModalProps> = ({
       } finally {
         setIsExtractingFile(false);
       }
-    } else if (file.type.startsWith('image/')) {
+    } else if (file.type.startsWith('image/') || file.type === 'application/pdf' || fileNameLower.endsWith('.pdf')) {
       try {
         setIsExtractingFile(true);
-        const reader = new FileReader();
-        reader.onload = async (e) => {
-          const base64 = e.target?.result as string;
-          // Send to OCR extraction endpoint
-          const res = await fetch('/api/rubric/extract', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ imageBase64: base64, imageMimeType: file.type }),
-          });
-          const data = await res.json();
-          if (data && data.title) {
-            setText(`# ${data.title}\n\n${(data.topicConstraints || []).join('\n')}\n\n${(data.keyQuestionsToAnswer || []).join('\n')}`);
-          }
-          setIsExtractingFile(false);
-        };
-        reader.readAsDataURL(file);
-      } catch (err) {
-        console.error('Error reading image paper:', err);
-        setIsExtractingFile(false);
-      }
-    } else if (file.type === 'application/pdf' || fileNameLower.endsWith('.pdf')) {
-      try {
-        setIsExtractingFile(true);
-        const reader = new FileReader();
-        reader.onload = async (e) => {
-          const base64 = e.target?.result as string;
-          const res = await fetch('/api/rubric/extract', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ pdfBase64: base64 }),
-          });
-          const data = await res.json();
-          if (data && data.title) {
-            setText(`# ${data.title}\n\n${(data.keyQuestionsToAnswer || []).join('\n')}`);
-          }
-          setIsExtractingFile(false);
-        };
-        reader.readAsDataURL(file);
-      } catch (err) {
-        console.error('Error reading PDF paper:', err);
+        const base64 = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(String(reader.result));
+          reader.onerror = () => reject(new Error('Could not read this file.'));
+          reader.readAsDataURL(file);
+        });
+        const isPdf = file.type === 'application/pdf' || fileNameLower.endsWith('.pdf');
+        const response = await aiFetch('/api/document/extract-text', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(isPdf ? { pdfBase64: base64 } : { imageBase64: base64, imageMimeType: file.type }),
+        });
+        const data = await response.json();
+        if (!response.ok || !data.text) throw new Error(data.error || 'No readable text was extracted.');
+        setText(data.text);
+      } catch (error) {
+        alert('Document extraction failed: ' + (error instanceof Error ? error.message : 'Please try another file.'));
+      } finally {
         setIsExtractingFile(false);
       }
     } else {
@@ -118,7 +96,7 @@ export const ImportModal: React.FC<ImportModalProps> = ({
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!text.trim()) return;
+    if (!text.trim() || isAnalyzing || isExtractingFile) return;
     await onImportAndAnalyze(text, title || fileName || undefined);
     onClose();
   };
@@ -251,7 +229,7 @@ export const ImportModal: React.FC<ImportModalProps> = ({
             </button>
             <button
               type="submit"
-              disabled={!text.trim() || isAnalyzing}
+              disabled={!text.trim() || isAnalyzing || isExtractingFile}
               className="px-5 py-2 text-xs font-semibold bg-[#0078D4] hover:bg-blue-600 text-white rounded-lg shadow-sm transition disabled:opacity-50 flex items-center gap-2"
             >
               {isAnalyzing ? (

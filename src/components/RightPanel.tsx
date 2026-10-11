@@ -1,3 +1,4 @@
+import { aiFetch } from '../lib/aiApi';
 import React, { useState, useEffect } from 'react';
 import {
   Search,
@@ -25,7 +26,7 @@ import {
   Lightbulb,
 } from 'lucide-react';
 import { ScholarlyPaper, OutlineSection, CitationStyle, AssignmentRubric } from '../types';
-import { formatInTextCitation, formatFullReference } from '../utils/citationFormatter';
+import { formatInTextCitation, formatFullReference, sortReferences } from '../utils/citationFormatter';
 
 interface RightPanelProps {
   rubric: AssignmentRubric | null;
@@ -139,7 +140,7 @@ export const RightPanel: React.FC<RightPanelProps> = ({
   const fetchAiSuggestions = async () => {
     try {
       setIsLoadingSuggestions(true);
-      const res = await fetch('/api/scholarly/suggest-topics', {
+      const res = await aiFetch('/api/scholarly/suggest-topics', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -148,6 +149,7 @@ export const RightPanel: React.FC<RightPanelProps> = ({
           studentDirection,
         }),
       });
+      if (!res.ok) throw new Error('Could not generate research suggestions. Please try again.');
       if (res.ok) {
         const data = await res.json();
         if (data.suggestions && data.suggestions.length > 0) {
@@ -156,6 +158,7 @@ export const RightPanel: React.FC<RightPanelProps> = ({
       }
     } catch (err) {
       console.error('Error fetching AI suggestions:', err);
+      alert(err instanceof Error ? err.message : 'Could not generate suggestions.');
     } finally {
       setIsLoadingSuggestions(false);
     }
@@ -297,7 +300,7 @@ export const RightPanel: React.FC<RightPanelProps> = ({
                 Article Reference Assistant
               </h3>
               <p className="text-[11px] text-gray-600 dark:text-gray-300">
-                Query Semantic Scholar API for peer-reviewed academic papers.
+                Search Semantic Scholar, with Crossref as a backup. Check each article’s relevance and peer-review status.
               </p>
             </div>
 
@@ -364,7 +367,7 @@ export const RightPanel: React.FC<RightPanelProps> = ({
             {isSearching ? (
               <div className="p-8 text-center space-y-2">
                 <RefreshCw className="w-6 h-6 text-[#0078D4] animate-spin mx-auto" />
-                <p className="text-xs font-medium text-gray-700 dark:text-gray-200">Searching Semantic Scholar...</p>
+                <p className="text-xs font-medium text-gray-700 dark:text-gray-200">Searching scholarly records...</p>
                 <p className="text-[11px] text-gray-500 dark:text-gray-400">Retrieving titles, authors, and abstracts</p>
               </div>
             ) : searchResults.length > 0 ? (
@@ -412,6 +415,7 @@ export const RightPanel: React.FC<RightPanelProps> = ({
                         <div className="flex-1 min-w-0">
                           <h4 className="font-semibold text-[#1C1C1C] dark:text-gray-100 leading-snug">
                             {paper.title}
+                            {paper.source && <span className="block text-[10px] font-normal text-gray-500">Source: {paper.source}{paper.source === 'Crossref' ? ' — backup search' : ''}</span>}
                           </h4>
                           <p className="text-[11px] text-gray-600 dark:text-gray-300 mt-1 line-clamp-1">
                             {authorsStr || 'Anonymous'} ({paper.year || 'n.d.'})
@@ -535,7 +539,7 @@ export const RightPanel: React.FC<RightPanelProps> = ({
             ) : (
               <div className="space-y-2.5">
                 {references.map((paper, idx) => {
-                  const inText = formatInTextCitation(paper, citationStyle, { narrative: false });
+                  const inText = formatInTextCitation(paper, citationStyle, { narrative: false, citationIndex: idx });
                   const fullBib = formatFullReference(paper, citationStyle, idx);
                   const isCopied = copiedId === paper.paperId;
 

@@ -6,3 +6,11 @@ coverage/
 *.log
 .env*
 !.env.example
+
+archives/
+.vs/
+
+.agents/
+.antigravity/
+.vscode/
+.cursor/

@@ -63,12 +63,12 @@ function handleFirestoreError(error: unknown, operationType: OperationType, path
 const PAPERS_COLLECTION = 'papers';
 const LOCAL_STORAGE_KEY = 'scholardesk_saved_papers';
 
-export function getLocalProjects(): SavedPaper[] {
+export function getLocalProjects(userId?: string): SavedPaper[] {
   try {
     const raw = localStorage.getItem(LOCAL_STORAGE_KEY);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
+    return Array.isArray(parsed) ? parsed.filter(p => !userId || p.userId === userId) : [];
   } catch {
     return [];
   }
@@ -78,12 +78,12 @@ export function setLocalProjects(papers: SavedPaper[]): void {
   try {
     localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(papers));
   } catch (err) {
-    console.warn('Could not save projects to localStorage:', err);
+    throw new Error('Could not save this draft on this device. Export a copy before closing the page.');
   }
 }
 
 export async function fetchUserProjects(userId?: string): Promise<SavedPaper[]> {
-  const localPapers = getLocalProjects();
+  const localPapers = getLocalProjects(userId);
   if (!userId) return localPapers;
 
   const path = PAPERS_COLLECTION;
@@ -98,23 +98,25 @@ export async function fetchUserProjects(userId?: string): Promise<SavedPaper[]> 
       cloudPapers.push({ id: d.id, ...d.data() } as SavedPaper);
     });
 
-    // Merge cloud papers with any unique local papers
-    const cloudIds = new Set(cloudPapers.map((p) => p.id));
-    const merged = [...cloudPapers];
-    for (const lp of localPapers) {
-      if (!cloudIds.has(lp.id)) {
-        merged.push(lp);
-      }
+    // Re-read the cache after the request: edits may have happened while offline or loading.
+    const allLocal = getLocalProjects();
+    const byId = new Map(cloudPapers.map(p => [p.id, p]));
+    for (const paper of allLocal.filter(p => p.userId === userId)) {
+      const cloud = byId.get(paper.id);
+      if (!cloud || Date.parse(paper.updatedAt) >= Date.parse(cloud.updatedAt)) byId.set(paper.id, paper);
     }
-
-    // Sort descending by updatedAt
-    merged.sort((a, b) => new Date(b.updatedAt || 0).getTime() - new Date(a.updatedAt || 0).getTime());
-    setLocalProjects(merged);
+    const merged = [...byId.values()].sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
+    setLocalProjects([...allLocal.filter(p => p.userId !== userId), ...merged]);
     return merged;
   } catch (error) {
     console.warn('Firestore listing fallback to local cache:', error);
-    return localPapers;
+    return getLocalProjects(userId);
   }
+}
+
+export function cacheProject(paper: SavedPaper): void {
+  const local = getLocalProjects();
+  setLocalProjects([paper, ...local.filter(p => p.id !== paper.id)]);
 }
 
 export async function saveProject(paper: SavedPaper): Promise<void> {
@@ -122,10 +124,7 @@ export async function saveProject(paper: SavedPaper): Promise<void> {
     throw new Error('Paper ID is required to save.');
   }
 
-  // Update local storage immediately for responsive UX
-  const local = getLocalProjects();
-  const updatedLocal = [paper, ...local.filter((p) => p.id !== paper.id)];
-  setLocalProjects(updatedLocal);
+  cacheProject(paper);
 
   if (!paper.userId || paper.userId === 'guest-user' || paper.userId === 'local-user') {
     return;
@@ -134,8 +133,7 @@ export async function saveProject(paper: SavedPaper): Promise<void> {
   const path = `${PAPERS_COLLECTION}/${paper.id}`;
   try {
     await setDoc(doc(db, PAPERS_COLLECTION, paper.id), {
-      ...paper,
-      updatedAt: new Date().toISOString(),
+      ...JSON.parse(JSON.stringify(paper)),
     });
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, path);
@@ -143,18 +141,16 @@ export async function saveProject(paper: SavedPaper): Promise<void> {
 }
 
 export async function deleteProject(paperId: string): Promise<void> {
-  // Remove from local storage
-  const local = getLocalProjects();
-  setLocalProjects(local.filter((p) => p.id !== paperId));
-
-  if (!auth.currentUser) return;
-
-  const path = `${PAPERS_COLLECTION}/${paperId}`;
-  try {
-    await deleteDoc(doc(db, PAPERS_COLLECTION, paperId));
-  } catch (error) {
-    handleFirestoreError(error, OperationType.DELETE, path);
+  const userId = auth.currentUser?.uid;
+  if (userId && userId !== 'local-user' && userId !== 'guest-user') {
+    const path = PAPERS_COLLECTION + '/' + paperId;
+    try {
+      await deleteDoc(doc(db, PAPERS_COLLECTION, paperId));
+    } catch (error) {
+      handleFirestoreError(error, OperationType.DELETE, path);
+    }
   }
+  setLocalProjects(getLocalProjects().filter(p => p.id !== paperId));
 }
 
 export function createDefaultBlankPaper(
@@ -255,7 +251,7 @@ export async function createNewProject(
   if (params.initialThesis) {
     paper.studentDirection = params.initialThesis;
   }
-  await saveProject(paper);
+  cacheProject(paper);
   return paper;
 }
 

@@ -171,3 +171,9 @@ export function formatFullReference(
       return `${formatAPAAuthors()} (${year}). ${title}. ${venue}.`;
   }
 }
+
+export function sortReferences(references: ScholarlyPaper[], style: CitationStyle): ScholarlyPaper[] {
+  if (style === 'IEEE') return [...references];
+  const key = (p: ScholarlyPaper) => p.authors?.[0]?.name.trim().split(/\s+/).at(-1) || p.title;
+  return [...references].sort((a, b) => key(a).localeCompare(key(b)));
+}

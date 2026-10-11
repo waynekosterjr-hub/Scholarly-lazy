@@ -18,10 +18,11 @@ import {
   Wand2,
 } from 'lucide-react';
 import { ScholarlyPaper, CitationStyle } from '../types';
-import { formatInTextCitation, formatFullReference } from '../utils/citationFormatter';
+import { formatInTextCitation, formatFullReference, sortReferences } from '../utils/citationFormatter';
 
 interface CenterEditorProps {
   content: string;
+  saveMessage: string;
   onChangeContent: (newContent: string) => void;
   references: ScholarlyPaper[];
   citationStyle: CitationStyle;
@@ -31,6 +32,7 @@ interface CenterEditorProps {
 
 export const CenterEditor: React.FC<CenterEditorProps> = ({
   content,
+  saveMessage,
   onChangeContent,
   references,
   citationStyle,
@@ -101,7 +103,7 @@ export const CenterEditor: React.FC<CenterEditorProps> = ({
     const end = textarea.selectionEnd;
     const text = textarea.value;
 
-    const citationText = formatInTextCitation(paper, citationStyle, { narrative });
+    const citationText = formatInTextCitation(paper, citationStyle, { narrative, citationIndex: references.findIndex(r => r.paperId === paper.paperId) });
     const newContent = text.substring(0, start) + citationText + text.substring(end);
     onChangeContent(newContent);
 
@@ -338,10 +340,10 @@ export const CenterEditor: React.FC<CenterEditorProps> = ({
             {/* APA/MLA Running Head & Header */}
             <div className="flex justify-between items-center text-[11px] text-gray-500 dark:text-gray-400 pb-4 mb-6 border-b border-gray-200 dark:border-gray-800/80 select-none font-serif">
               <span className="uppercase tracking-wider font-mono text-[10px] text-gray-500 dark:text-gray-400">
-                RUNNING HEAD: {citationStyle === 'MLA9' ? 'ACADEMIC ESSAY' : 'ACADEMIC DRAFT'}
+                Draft editor · Markdown supported
               </span>
               <span className="font-sans text-[11px] text-gray-500 dark:text-gray-400">
-                {citationStyle} • Times New Roman 12pt Standard
+                {citationStyle} · View final pages in Export preview
               </span>
             </div>
 
@@ -410,6 +412,7 @@ export const CenterEditor: React.FC<CenterEditorProps> = ({
                       filteredReferences.map((paper) => {
                         const inText = formatInTextCitation(paper, citationStyle, {
                           narrative: citationMode === 'narrative',
+                          citationIndex: references.findIndex(r => r.paperId === paper.paperId),
                         });
                         return (
                           <button
@@ -460,7 +463,7 @@ export const CenterEditor: React.FC<CenterEditorProps> = ({
               {/* Header */}
               <div className="flex justify-between items-center text-[11px] text-gray-500 dark:text-gray-400 pb-4 mb-6 border-b border-gray-200 dark:border-gray-800/80 select-none font-serif">
                 <span className="uppercase tracking-wider font-mono text-[10px] text-gray-500 dark:text-gray-400">
-                  RUNNING HEAD: {citationStyle === 'MLA9' ? 'WORKS CITED' : 'REFERENCES'}
+                  Reference list
                 </span>
                 <span className="font-semibold text-gray-700 dark:text-gray-300">
                   {references.length} Indexed Reference{references.length === 1 ? '' : 's'}
@@ -479,12 +482,7 @@ export const CenterEditor: React.FC<CenterEditorProps> = ({
 
               {/* Alphabetical Reference Entries with Authentic Hanging Indent (pl-8 -indent-8) */}
               <div className="space-y-4 text-xs md:text-sm text-gray-800 dark:text-gray-200 font-serif leading-loose flex-1">
-                {[...references]
-                  .sort((a, b) => {
-                    const nameA = (a.authors?.[0]?.name || a.title).toLowerCase();
-                    const nameB = (b.authors?.[0]?.name || b.title).toLowerCase();
-                    return nameA.localeCompare(nameB);
-                  })
+                {sortReferences(references, citationStyle)
                   .map((paper, idx) => {
                     const formatted = formatFullReference(paper, citationStyle, idx);
                     return (
@@ -493,11 +491,7 @@ export const CenterEditor: React.FC<CenterEditorProps> = ({
                         className="pl-8 -indent-8 text-gray-800 dark:text-gray-200 hover:text-black dark:hover:text-white transition group relative leading-relaxed"
                       >
                         <span>{formatted}</span>
-                        {paper.doi && (
-                          <span className="text-[#0078D4] text-xs ml-1.5 opacity-85 group-hover:opacity-100 font-sans">
-                            https://doi.org/{paper.doi}
-                          </span>
-                        )}
+
                       </div>
                     );
                   })}
@@ -543,7 +537,7 @@ export const CenterEditor: React.FC<CenterEditorProps> = ({
             </span>
           </div>
           <span className="text-gray-300 dark:text-gray-600">•</span>
-          <span className="text-[11px] text-gray-500 dark:text-gray-400">Auto-saved to session</span>
+          <span className="text-[11px] text-gray-500 dark:text-gray-400">{saveMessage}</span>
         </div>
       </footer>
     </main>

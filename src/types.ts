@@ -6,6 +6,7 @@ export interface Author {
 }
 
 export interface ScholarlyPaper {
+  source?: 'Semantic Scholar' | 'Crossref';
   paperId: string;
   title: string;
   authors: Author[];
@@ -118,6 +119,7 @@ export interface SavedPaper {
   progressionSteps: ProgressionStep[];
   createdAt: string;
   updatedAt: string;
+  titlePageConfig?: TitlePageConfig;
 }
 
 export interface IdentifiedCitation {
@@ -178,3 +180,10 @@ export interface ImportAnalysisResult {
 
 export type PanelState = 'collapsed' | 'normal' | 'expanded';
 
+
+export interface DraftSectionResponse { draftContent: string; }
+export interface EditorAssistResponse { result: string; }
+export interface DocumentTextResponse { text: string; }
+export type SaveStatus = 'unsaved' | 'local' | 'syncing' | 'cloud' | 'error';
+
+export interface InlineText { text: string; bold?: boolean; italics?: boolean; }

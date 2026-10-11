@@ -74,24 +74,21 @@ export const ProofreadModal: React.FC<ProofreadModalProps> = ({
                   feedback.overallScore
                 )}`}
               >
-                <span className="text-2xl font-black">{feedback.overallScore}</span>
+                <span className="text-2xl font-black">{feedback.letterGrade === 'Not scored' ? '—' : feedback.overallScore}</span>
                 <span className="text-[10px] uppercase font-bold tracking-wider">/ 100</span>
               </div>
               <div>
                 <div className="flex items-center gap-2">
                   <span className="text-lg font-bold text-[#1C1C1C] dark:text-gray-100">
-                    Grade: {feedback.letterGrade}
+                    Estimated grade: {feedback.letterGrade}
                   </span>
                   <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-purple-950 text-purple-300 border border-purple-800">
-                    Peer-Reviewed Evaluation
+                    Provisional AI feedback
                   </span>
                 </div>
                 <p className="text-gray-600 dark:text-gray-300 mt-1 text-xs max-w-lg">
-                  {feedback.overallScore >= 90
-                    ? 'Excellent scholarly rigor with coherent argumentation and APA compliance.'
-                    : feedback.overallScore >= 80
-                    ? 'Good scholarly foundation with minor opportunities to deepen evidence synthesis.'
-                    : 'Requires revisions on rubric adherence, citation accuracy, and argument depth.'}
+                  Compare this feedback with your instructor’s rubric. Library matches do not verify full-text evidence or establish submission readiness.
+                  {' '}Scores require explicit criterion weights. Letter estimates use a general 90/80/70/60 scale.
                 </p>
               </div>
             </div>
@@ -105,8 +102,9 @@ export const ProofreadModal: React.FC<ProofreadModalProps> = ({
                 {feedback.wordCountAnalysis?.currentWords?.toLocaleString() || 0} words
               </span>
               <p className="text-[10px] text-gray-600 dark:text-gray-300 mt-0.5">
-                Target: {feedback.wordCountAnalysis?.targetWords?.toLocaleString() || 2000}
+                Target: {feedback.wordCountAnalysis?.targetWords?.toLocaleString() || 'Not specified'}
               </p>
+              <p className="text-[10px] text-gray-500">{feedback.wordCountAnalysis?.recommendation}</p>
             </div>
           </div>
 
@@ -209,7 +207,7 @@ export const ProofreadModal: React.FC<ProofreadModalProps> = ({
                         <td className="py-2 px-3">
                           {cit.paperFound ? (
                             <span className="text-emerald-600 flex items-center gap-1 font-medium">
-                              <Check className="w-3.5 h-3.5" /> Verified
+                              <Check className="w-3.5 h-3.5" /> Library match
                             </span>
                           ) : (
                             <span className="text-rose-600 font-medium">Not in pool</span>
@@ -217,7 +215,7 @@ export const ProofreadModal: React.FC<ProofreadModalProps> = ({
                         </td>
                         <td className="py-2 px-3">
                           {cit.styleCompliant ? (
-                            <span className="text-emerald-600 font-medium">Valid APA</span>
+                            <span className="text-emerald-600 font-medium">Appears compliant</span>
                           ) : (
                             <span className="text-amber-600 font-medium">Style issue</span>
                           )}

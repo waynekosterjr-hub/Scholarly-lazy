@@ -1,3 +1,4 @@
+import { ModelSelector } from './ModelSelector';
 import React from 'react';
 import {
   FileText,
@@ -23,6 +24,7 @@ import { logout } from '../lib/firebase';
 
 interface HeaderProps {
   rubric: AssignmentRubric | null;
+  paperTitle?: string;
   wordCount: number;
   citationStyle: CitationStyle;
   onCitationStyleChange: (style: CitationStyle) => void;
@@ -37,6 +39,7 @@ interface HeaderProps {
   onStartGuidedTour: () => void;
   savedPaperCount?: number;
   isSavingToCloud?: boolean;
+  saveMessage: string;
   isProofreading?: boolean;
   isDarkMode: boolean;
   onToggleDarkMode: (e: React.MouseEvent) => void;
@@ -44,6 +47,7 @@ interface HeaderProps {
 
 export const Header: React.FC<HeaderProps> = ({
   rubric,
+  paperTitle,
   wordCount,
   citationStyle,
   onCitationStyleChange,
@@ -58,6 +62,7 @@ export const Header: React.FC<HeaderProps> = ({
   onStartGuidedTour,
   savedPaperCount = 0,
   isSavingToCloud = false,
+  saveMessage,
   isProofreading = false,
   isDarkMode,
   onToggleDarkMode,
@@ -87,8 +92,8 @@ export const Header: React.FC<HeaderProps> = ({
 
           {/* Quick Cloud Save Indicator */}
           <div className="hidden md:flex items-center gap-1.5 text-[11px] text-gray-500 dark:text-gray-400">
-            <Cloud className={`w-3.5 h-3.5 ${isSavingToCloud ? 'text-amber-500 animate-pulse' : 'text-emerald-600 dark:text-emerald-400'}`} />
-            <span>{isSavingToCloud ? 'Saving to Google Cloud...' : 'Saved to Cloud'}</span>
+            <Cloud className={`w-3.5 h-3.5 ${isSavingToCloud ? 'text-amber-500 animate-pulse' : saveMessage === 'Saved to Cloud' ? 'text-emerald-600 dark:text-emerald-400' : 'text-amber-600'}`} />
+            <span role="status" aria-live="polite">{saveMessage}</span>
           </div>
         </div>
 
@@ -115,21 +120,13 @@ export const Header: React.FC<HeaderProps> = ({
           <span className="text-gray-300 dark:text-gray-700">•</span>
           <div className="flex items-center gap-1 text-[11px] text-gray-600 dark:text-gray-300">
             <span className="inline-block w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
-            <span>Semantic Scholar: Connected</span>
+            <span>Semantic Scholar search</span>
           </div>
           <span className="text-gray-300 dark:text-gray-700">•</span>
           <div className="flex items-center gap-1 text-[11px] text-gray-600 dark:text-gray-300">
             <Sparkles className="w-3 h-3 text-amber-600" />
             <span>AI Model:</span>
-            <select
-              aria-label="AI Reasoning Engine Selector"
-              className="bg-transparent text-gray-700 dark:text-gray-200 font-medium focus:outline-none cursor-pointer hover:text-[#1C1C1C] dark:text-gray-100 transition-colors"
-              defaultValue="gemini-3.5-flash"
-            >
-              <option value="gemini-3.5-flash">Gemini 3.5 Flash</option>
-              <option value="gemini-3.7-flash">Gemini 3.7 Flash</option>
-              <option value="gemini-3.1-pro-preview">Gemini 3.1 Pro</option>
-            </select>
+            <ModelSelector />
           </div>
         </div>
       </div>
@@ -186,7 +183,7 @@ export const Header: React.FC<HeaderProps> = ({
             </div>
             <div className="min-w-0">
               <h1 className="text-xs font-bold text-[#1C1C1C] dark:text-gray-100 leading-tight truncate">
-                {rubric?.title || 'Untitled Workspace'}
+                {paperTitle || rubric?.title || 'Untitled Workspace'}
               </h1>
               <p className="text-[10px] text-gray-500 dark:text-gray-400 truncate">
                 {rubric?.courseName || 'General Academic Draft'}

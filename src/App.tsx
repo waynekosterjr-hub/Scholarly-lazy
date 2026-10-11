@@ -1,3 +1,5 @@
+import { draftWithoutRepeatedHeading } from './utils/documentLayout';
+import { aiFetch, apiErrorMessage } from './lib/aiApi';
 import React, { useState, useEffect, useRef } from 'react';
 import { Joyride, STATUS, ACTIONS, EVENTS, Step } from 'react-joyride';
 import { Header } from './components/Header';
@@ -24,6 +26,9 @@ import {
   SavedPaper,
   ImportAnalysisResult,
   TitlePageConfig,
+  DraftSectionResponse,
+  EditorAssistResponse,
+  SaveStatus,
 } from './types';
 import { formatInTextCitation } from './utils/citationFormatter';
 import {
@@ -32,6 +37,9 @@ import {
   deleteProject,
   createNewProject,
   getLocalProjects,
+  cacheProject,
+  setLocalProjects,
+  createDefaultBlankPaper,
 } from './lib/projectsService';
 import { auth } from './lib/firebase';
 import {
@@ -43,63 +51,30 @@ import {
 } from 'lucide-react';
 
 export default function App() {
-  const defaultScenario = SAMPLE_ASSIGNMENTS[0];
-
-  // Core Document State
-  const [rubric, setRubric] = useState<AssignmentRubric | null>(defaultScenario.rubric);
-  const [references, setReferences] = useState<ScholarlyPaper[]>(defaultScenario.samplePapers);
-  const [content, setContent] = useState<string>(defaultScenario.initialDraft);
-  const [citationStyle, setCitationStyle] = useState<CitationStyle>(
-    defaultScenario.rubric.requiredCitationStyle || 'APA7'
-  );
-  const [studentDirection, setStudentDirection] = useState<string>(defaultScenario.thesis);
-  const [outline, setOutline] = useState<OutlineSection[]>(defaultScenario.sampleOutline);
-  const [progressionSteps, setProgressionSteps] = useState<ProgressionStep[]>([
-    {
-      id: 'step-1',
-      timestamp: '10:15 AM',
-      stage: 'Rubric Ingestion',
-      summary: 'Parsed PSYC 4020 assignment rubric & constraints',
-      details: 'Identified 2,000 target word count, APA 7th style, 4+ required peer-reviewed sources, and 4 grading criteria.',
-    },
-    {
-      id: 'step-2',
-      timestamp: '10:22 AM',
-      stage: 'Scholarly Research',
-      summary: 'Curated 4 peer-reviewed fMRI & cognitive studies from Semantic Scholar',
-      details: 'Selected Rostova et al. (2023), Jenkins & O’Connor (2024), Al-Mansoor & Patel (2023), and Lindqvist & Berg (2022).',
-    },
-    {
-      id: 'step-3',
-      timestamp: '10:35 AM',
-      stage: 'Outline Synthesis',
-      summary: 'Formulated 5-section cross-referenced outline',
-      details: 'Mapped striatal/dlPFC neuroimaging to Section 2, and visual search agility to Section 3 as counter-argument.',
-    },
-    {
-      id: 'step-4',
-      timestamp: '11:10 AM',
-      stage: 'Drafting',
-      summary: 'Assembled full 5-section academic draft with in-text APA citations',
-      details: 'Integrated parenthetical and narrative citations matching the Reference Pool.',
-    },
-  ]);
-
-  // Title Page & Metadata Configuration
-  const [titlePageConfig, setTitlePageConfig] = useState<TitlePageConfig>({
-    authorName: 'Jane Doe',
-    institution: 'Department of Psychology, University of California',
-    instructorName: 'Prof. Eleanor Vance, Ph.D.',
-    courseName: 'PSYC 4020: Advanced Developmental Cognitive Neuroscience',
-    includeTitlePage: true,
-    paperTitle: 'Cognitive & Neural Mechanisms of Video Game-Induced Neuroplasticity',
-    dueDate: '',
+  const [initialPaper] = useState(() => {
+    const userId = auth.currentUser?.uid || 'local-user';
+    return getLocalProjects(userId).sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt))[0]
+      || createDefaultBlankPaper(userId);
   });
-
-  // Persistence & User Projects
-  const [currentPaperId, setCurrentPaperId] = useState<string | null>(null);
-  const [userPapers, setUserPapers] = useState<SavedPaper[]>([]);
-  const [isSavingToCloud, setIsSavingToCloud] = useState<boolean>(false);
+  const hadCachedPaper = useRef(getLocalProjects(auth.currentUser?.uid).some(p => p.id === initialPaper.id));
+  const workspaceEdited = useRef(false);
+  const emptyTitlePage: TitlePageConfig = { authorName: '', institution: '', instructorName: '', courseName: '', includeTitlePage: true, paperTitle: '', dueDate: '' };
+  const [rubric, setRubric] = useState<AssignmentRubric | null>(initialPaper.rubric);
+  const [references, setReferences] = useState<ScholarlyPaper[]>(initialPaper.references);
+  const [content, setContent] = useState(initialPaper.content);
+  const [citationStyle, setCitationStyle] = useState<CitationStyle>(initialPaper.citationStyle);
+  const [studentDirection, setStudentDirection] = useState(initialPaper.studentDirection);
+  const [outline, setOutline] = useState<OutlineSection[]>(initialPaper.outline);
+  const [progressionSteps, setProgressionSteps] = useState<ProgressionStep[]>(initialPaper.progressionSteps);
+  const [titlePageConfig, setTitlePageConfig] = useState<TitlePageConfig>(initialPaper.titlePageConfig || { ...emptyTitlePage, paperTitle: initialPaper.title, courseName: initialPaper.courseName || '' });
+  const [currentPaperId, setCurrentPaperId] = useState<string | null>(initialPaper.id);
+  const [userPapers, setUserPapers] = useState<SavedPaper[]>(getLocalProjects(auth.currentUser?.uid));
+  const [saveStatus, setSaveStatus] = useState<SaveStatus>('unsaved');
+  const [projectsLoaded, setProjectsLoaded] = useState(false);
+  const initialWorkspace = useRef(JSON.stringify({ currentPaperId, content, rubric, references, outline, citationStyle, studentDirection, titlePageConfig, progressionSteps }));
+  const [saveError, setSaveError] = useState('');
+  const isSavingToCloud = saveStatus === 'syncing';
+  const saveMessage = saveStatus === 'cloud' ? 'Saved to Cloud' : saveStatus === 'syncing' ? 'Saved on this device · syncing…' : saveStatus === 'local' ? 'Saved on this device' : saveStatus === 'error' ? saveError : 'Unsaved changes';
 
   // Panel Collapsing States
   const [isLeftPanelCollapsed, setIsLeftPanelCollapsed] = useState<boolean>(false);
@@ -111,6 +86,7 @@ export default function App() {
   const [isPastProjectsOpen, setIsPastProjectsOpen] = useState(false);
   const [isImportOpen, setIsImportOpen] = useState(false);
   const [isAnalysisOpen, setIsAnalysisOpen] = useState(false);
+  const [isImporting, setIsImporting] = useState(false);
   const [isNoRubricPromptOpen, setIsNoRubricPromptOpen] = useState(false);
   const [importAnalysisResult, setImportAnalysisResult] = useState<ImportAnalysisResult | null>(null);
   const [extractedImportPapers, setExtractedImportPapers] = useState<ScholarlyPaper[]>([]);
@@ -219,7 +195,7 @@ export default function App() {
 
   // First Launch Tutorial Check & Local Projects Cache
   useEffect(() => {
-    const initialPapers = getLocalProjects();
+    const initialPapers = getLocalProjects(auth.currentUser?.uid);
     if (initialPapers.length > 0) {
       setUserPapers(initialPapers);
     }
@@ -238,11 +214,20 @@ export default function App() {
           setUserPapers(papers);
           const tutorialDone = localStorage.getItem('scholardesk_tutorial_completed');
           // If tutorial was already done and user has existing saved papers, load their most recent
-          if (papers.length > 0 && tutorialDone && !currentPaperId) {
-            loadPaperIntoWorkspace(papers[0]);
+          if (!workspaceEdited.current) {
+            const recent = hadCachedPaper.current
+              ? papers.find(p => p.id === initialPaper.id)
+              : papers.find(p => p.id !== initialPaper.id);
+            if (recent) {
+              if (!hadCachedPaper.current) setLocalProjects(getLocalProjects().filter(p => p.id !== initialPaper.id));
+              loadPaperIntoWorkspace(recent);
+              setUserPapers(hadCachedPaper.current ? papers : papers.filter(p => p.id !== initialPaper.id));
+            }
           }
         } catch (err) {
           console.error('Failed to load user papers:', err);
+        } finally {
+          setProjectsLoaded(true);
         }
       }
     });
@@ -252,56 +237,53 @@ export default function App() {
   // Live word count
   const wordCount = content.trim() ? content.trim().split(/\s+/).length : 0;
 
-  // Auto-Save Debouncer to Cloud
+  // Cache every change immediately; debounce only the network write.
   useEffect(() => {
-    if (!auth.currentUser || !currentPaperId) return;
-
+    const userId = auth.currentUser?.uid;
+    if (!userId || !currentPaperId) return;
+    const snapshot = JSON.stringify({ currentPaperId, content, rubric, references, outline, citationStyle, studentDirection, titlePageConfig, progressionSteps });
+    if (snapshot !== initialWorkspace.current) workspaceEdited.current = true;
+    const existing = getLocalProjects(userId).find(p => p.id === currentPaperId);
+    const paper: SavedPaper = {
+      id: currentPaperId, userId,
+      title: titlePageConfig.paperTitle?.trim() || rubric?.title || 'Untitled Academic Paper',
+      courseName: titlePageConfig.courseName || rubric?.courseName || '',
+      citationStyle, content, studentDirection, wordCount, rubric, references, outline, progressionSteps, titlePageConfig,
+      createdAt: existing?.createdAt || new Date().toISOString(),
+      updatedAt: !workspaceEdited.current && existing ? existing.updatedAt : new Date().toISOString(),
+    };
+    try {
+      cacheProject(paper);
+      setUserPapers(getLocalProjects(userId));
+      setSaveStatus('local');
+      setSaveError('');
+    } catch (error) {
+      setSaveStatus('error');
+      setSaveError(error instanceof Error ? error.message : 'Draft could not be saved.');
+      return;
+    }
+    // Do not push an old cached draft before comparing it with the initial cloud read.
+    if (!projectsLoaded || userId === 'local-user' || userId === 'guest-user') return;
+    let cancelled = false;
     const timer = setTimeout(async () => {
+      setSaveStatus('syncing');
       try {
-        setIsSavingToCloud(true);
-        const existingPaper = userPapers.find((p) => p.id === currentPaperId);
-        const paperToSave: SavedPaper = {
-          id: currentPaperId,
-          userId: auth.currentUser!.uid,
-          title: rubric?.title || 'Untitled Academic Paper',
-          courseName: rubric?.courseName || 'General Academic Draft',
-          citationStyle,
-          content,
-          studentDirection,
-          wordCount,
-          rubric: rubric || {
-            title: 'Untitled Academic Paper',
-            assignmentType: 'Research Paper',
-            requiredWordCount: { min: 1500, max: 2500, target: 2000 },
-            requiredCitationStyle: citationStyle,
-            requiredSourceCount: 4,
-            topicConstraints: [],
-            keyQuestionsToAnswer: [],
-            formattingRules: [],
-            criteria: [],
-          },
-          references,
-          outline,
-          progressionSteps,
-          createdAt: existingPaper?.createdAt || new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
-        };
-        await saveProject(paperToSave);
-        const papers = await fetchUserProjects(auth.currentUser!.uid);
-        setUserPapers(papers);
-      } catch (err) {
-        console.error('Auto-save error:', err);
-      } finally {
-        setIsSavingToCloud(false);
+        await saveProject(paper);
+        if (!cancelled) setSaveStatus('cloud');
+      } catch (error) {
+        if (!cancelled) {
+          setSaveStatus('error');
+          setSaveError('Saved on this device · cloud sync failed');
+        }
       }
     }, 2500);
-
-    return () => clearTimeout(timer);
-  }, [content, rubric, references, outline, citationStyle, studentDirection, currentPaperId, wordCount]);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [content, rubric, references, outline, citationStyle, studentDirection, currentPaperId, wordCount, titlePageConfig, progressionSteps, projectsLoaded]);
 
   // Helpers to load / reset workspace
   const loadPaperIntoWorkspace = (paper: SavedPaper) => {
     setCurrentPaperId(paper.id);
+    setTitlePageConfig(paper.titlePageConfig || { ...emptyTitlePage, paperTitle: paper.title, courseName: paper.courseName || '' });
     setContent(paper.content || '');
     setCitationStyle(paper.citationStyle || 'APA7');
     setStudentDirection(paper.studentDirection || '');
@@ -322,7 +304,8 @@ export default function App() {
   };
 
   const handleStartFreshWorkspace = () => {
-    setCurrentPaperId(null);
+    setCurrentPaperId(crypto.randomUUID());
+    setTitlePageConfig({ ...emptyTitlePage });
     setContent('');
     setRubric(null);
     setReferences([]);
@@ -342,8 +325,7 @@ export default function App() {
   const handleCompleteTutorial = () => {
     localStorage.setItem('scholardesk_tutorial_completed', 'true');
     setIsTutorialOpen(false);
-    // User requested that after tutorial completion/skip, sample data is no longer loaded
-    handleStartFreshWorkspace();
+    // The initial workspace is already a blank, persistent project.
   };
 
   const handleCreateNewPaper = async (params: {
@@ -369,6 +351,7 @@ export default function App() {
       setUserPapers(papers);
     } catch (err) {
       console.error('Error creating new paper:', err);
+      alert('Could not create the paper. Your existing draft is unchanged.');
     }
   };
 
@@ -387,6 +370,7 @@ export default function App() {
       }
     } catch (err) {
       console.error('Error deleting paper:', err);
+      alert('The paper could not be deleted. Check your connection and try again.');
     }
   };
 
@@ -399,7 +383,7 @@ export default function App() {
   }) => {
     try {
       setIsExtractingRubric(true);
-      const res = await fetch('/api/rubric/extract', {
+      const res = await aiFetch('/api/rubric/extract', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
@@ -409,6 +393,7 @@ export default function App() {
       const data = await res.json();
       if (data.rubric) {
         setRubric(data.rubric);
+        setTitlePageConfig(prev => ({ ...prev, paperTitle: data.rubric.title, courseName: data.rubric.courseName || prev.courseName }));
         if (data.rubric.requiredCitationStyle) {
           setCitationStyle(data.rubric.requiredCitationStyle);
         }
@@ -436,17 +421,18 @@ export default function App() {
   const handleSearchSemanticScholar = async (query: string): Promise<ScholarlyPaper[]> => {
     try {
       setIsSearchingScholar(true);
-      const res = await fetch('/api/scholarly/search', {
+      const res = await aiFetch('/api/scholarly/search', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ query, limit: 8 }),
       });
 
-      if (!res.ok) throw new Error('Search failed');
+      if (!res.ok) { const error = await res.json(); throw new Error(error.error || 'Search failed'); }
       const data = await res.json();
       return data.papers || [];
     } catch (err) {
       console.error(err);
+      alert(err instanceof Error ? err.message : 'Scholarly search failed.');
       return [];
     } finally {
       setIsSearchingScholar(false);
@@ -470,6 +456,13 @@ export default function App() {
   };
 
   const handleRemovePaperFromPool = (paperId: string) => {
+    const index = references.findIndex(p => p.paperId === paperId);
+    if (citationStyle === 'IEEE' && index >= 0) {
+      setContent(previous => previous.replace(/\[(\d+)\]/g, (match, value) => {
+        const number = Number(value);
+        return number === index + 1 ? '[citation needed]' : number > index + 1 ? '[' + (number - 1) + ']' : match;
+      }));
+    }
     setReferences((prev) => prev.filter((r) => r.paperId !== paperId));
   };
 
@@ -484,7 +477,7 @@ export default function App() {
 
   // 4. Insert Citation directly into Editor
   const handleInsertInTextToEditor = (paper: ScholarlyPaper, narrative = false) => {
-    const cite = formatInTextCitation(paper, citationStyle, { narrative });
+    const cite = formatInTextCitation(paper, citationStyle, { narrative, citationIndex: references.findIndex(r => r.paperId === paper.paperId) });
     setContent((prev) => prev + ' ' + cite + ' ');
   };
 
@@ -492,18 +485,18 @@ export default function App() {
   const handleGenerateOutline = async () => {
     try {
       setIsGeneratingOutline(true);
-      const res = await fetch('/api/outline/generate', {
+      const res = await aiFetch('/api/strategy/outline', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           rubric,
-          selectedPapers: references,
+          selectedArticles: references,
           studentDirection,
           citationStyle,
         }),
       });
 
-      if (!res.ok) throw new Error('Failed to generate outline');
+      if (!res.ok) throw new Error(await apiErrorMessage(res, 'Failed to generate outline'));
       const data = await res.json();
       if (data.outline) {
         setOutline(data.outline);
@@ -530,22 +523,23 @@ export default function App() {
   const handleDraftSection = async (section: OutlineSection) => {
     try {
       setDraftingSectionId(section.id);
-      const res = await fetch('/api/section/draft', {
+      const res = await aiFetch('/api/strategy/draft-section', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           section,
+          existingDocumentText: content,
           rubric,
-          selectedPapers: references,
+          selectedArticles: references,
           studentDirection,
           citationStyle,
         }),
       });
 
-      if (!res.ok) throw new Error('Failed to draft section');
-      const data = await res.json();
-      if (data.draft) {
-        const nextOutline = outline.map((s) => (s.id === section.id ? { ...s, draftContent: data.draft } : s));
+      if (!res.ok) throw new Error(await apiErrorMessage(res, 'Failed to draft section'));
+      const data: DraftSectionResponse = await res.json();
+      if (data.draftContent) {
+        const nextOutline = outline.map((s) => (s.id === section.id ? { ...s, draftContent: data.draftContent } : s));
         setOutline(nextOutline);
         setProgressionSteps((prev) => [
           ...prev,
@@ -570,7 +564,7 @@ export default function App() {
     if (!section.draftContent) return;
     setContent((prev) => {
       const divider = prev.trim().length > 0 ? '\n\n' : '';
-      return `${prev}${divider}## ${section.heading}\n\n${section.draftContent}`;
+      return `${prev}${divider}## ${section.heading}\n\n${draftWithoutRepeatedHeading(section.draftContent, section.heading)}`;
     });
   };
 
@@ -579,12 +573,12 @@ export default function App() {
   const handleEditorAssist = async (action: string, selectedText: string): Promise<string> => {
     try {
       setIsAssisting(true);
-      const res = await fetch('/api/editor/assist', {
+      const res = await aiFetch('/api/editor/assist', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           action,
-          currentText: content,
+          fullDocument: content,
           selectedText,
           rubric,
           references,
@@ -592,9 +586,9 @@ export default function App() {
         }),
       });
 
-      if (!res.ok) throw new Error('Assist action failed');
-      const data = await res.json();
-      return data.resultText || '';
+      if (!res.ok) throw new Error(await apiErrorMessage(res, 'Assist action failed'));
+      const data: EditorAssistResponse = await res.json();
+      return data.result || '';
     } catch (err: any) {
       console.error(err);
       alert('Assistant failed: ' + err.message);
@@ -608,18 +602,18 @@ export default function App() {
   const handleRunProofread = async () => {
     try {
       setIsProofreading(true);
-      const res = await fetch('/api/rubric/proofread', {
+      const res = await aiFetch('/api/proofread/review', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          documentContent: content,
+          documentText: content,
           rubric,
-          references,
+          selectedArticles: references,
           citationStyle,
         }),
       });
 
-      if (!res.ok) throw new Error('Proofread failed');
+      if (!res.ok) throw new Error(await apiErrorMessage(res, 'Proofread failed'));
       const data = await res.json();
       if (data.feedback) {
         setReviewFeedback(data.feedback);
@@ -634,125 +628,46 @@ export default function App() {
   };
 
   // 9. Import Document Flow & AI Source Identification
-  const handleImportDocument = async (importedText: string) => {
-    setPendingImportText(importedText);
-    setContent(importedText);
-
-    // Check if rubric exists
-    const hasRubric = Boolean(rubric && rubric.criteria && rubric.criteria.length > 0);
-    if (!hasRubric) {
-      setIsNoRubricPromptOpen(true);
-    }
-
-    // Call AI document analysis endpoint
+  const handleImportDocument = async (importedText: string, suppliedTitle?: string) => {
+    if (isImporting || !auth.currentUser) return;
+    setIsImporting(true);
+    const title = suppliedTitle?.trim() || importedText.split('\n')[0].replace(/^#+\s*/, '').slice(0, 100).trim() || 'Imported Research Paper';
+    const importedPaper = createDefaultBlankPaper(auth.currentUser.uid, title, rubric?.courseName || '', citationStyle);
+    importedPaper.content = importedText;
+    importedPaper.wordCount = importedText.trim().split(/\s+/).length;
+    importedPaper.rubric = rubric ? { ...rubric, title } : null;
+    importedPaper.titlePageConfig = { ...emptyTitlePage, paperTitle: title, courseName: rubric?.courseName || '' };
     try {
-      const res = await fetch('/api/document/analyze-import', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          documentText: importedText,
-          rubric: rubric,
-        }),
+      cacheProject(importedPaper);
+    } catch (error) {
+      setIsImporting(false);
+      alert(error instanceof Error ? error.message : 'Could not save the imported document.');
+      return;
+    }
+    try {
+      const res = await aiFetch('/api/document/analyze-import', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ documentText: importedText, rubric, studentDirection }),
       });
-
-      if (res.ok) {
-        const data = await res.json();
-        const extractedTitle =
-          data.analysis?.titlePageMetadata?.paperTitle?.trim() ||
-          data.analysis?.extractedTitle?.trim() ||
-          importedText.split('\n')[0].replace(/^#+\s*/, '').slice(0, 100).trim() ||
-          'Imported Research Paper';
-        const extractedCourse =
-          data.analysis?.titlePageMetadata?.courseName?.trim() ||
-          rubric?.courseName ||
-          'Academic Research';
-
-        if (data.analysis) {
-          setImportAnalysisResult(data.analysis);
-          setIsAnalysisOpen(true);
-
-          // Auto-fill Title Page metadata fields if recognized
-          if (data.analysis.titlePageMetadata || data.analysis.extractedTitle) {
-            const meta = data.analysis.titlePageMetadata || {};
-            setTitlePageConfig((prev) => ({
-              ...prev,
-              authorName: meta.authorName?.trim() || prev.authorName,
-              institution: meta.institution?.trim() || prev.institution,
-              instructorName: meta.instructorName?.trim() || prev.instructorName,
-              courseName: meta.courseName?.trim() || prev.courseName,
-              paperTitle: meta.paperTitle?.trim() || data.analysis.extractedTitle?.trim() || prev.paperTitle,
-              dueDate: meta.dueDate?.trim() || prev.dueDate,
-            }));
-          }
-        }
-
-        // Auto-add all identified references directly to the reference pool
-        let updatedRefs = references;
-        if (data.extractedPapers && data.extractedPapers.length > 0) {
-          setExtractedImportPapers(data.extractedPapers);
-          const existingTitles = new Set(references.map((p) => p.title.toLowerCase().trim()));
-          const newRefs = (data.extractedPapers as ScholarlyPaper[]).filter(
-            (p) => !existingTitles.has(p.title.toLowerCase().trim())
-          );
-          updatedRefs = [...references, ...newRefs];
-          setReferences(updatedRefs);
-        }
-
-        const newStep: ProgressionStep = {
-          id: `step-${Date.now()}`,
-          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-          stage: 'AI Import Analysis',
-          summary: `Imported & Analyzed "${extractedTitle}"`,
-          details: `Indexed ${(data.extractedPapers || []).length} scholarly sources and registered to past projects.`,
-        };
-        const nextSteps = [...progressionSteps, newStep];
-        setProgressionSteps(nextSteps);
-
-        // Assign a distinct paper ID and register into Past Projects
-        const newPaperId = `paper-import-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
-        setCurrentPaperId(newPaperId);
-
-        const currentWordCount = data.analysis?.wordCount || (importedText.trim() ? importedText.trim().split(/\s+/).length : 0);
-
-        const savedImportedPaper: SavedPaper = {
-          id: newPaperId,
-          userId: auth.currentUser ? auth.currentUser.uid : 'guest-user',
-          title: extractedTitle,
-          courseName: extractedCourse,
-          citationStyle: citationStyle,
-          content: importedText,
-          studentDirection: '',
-          wordCount: currentWordCount,
-          rubric: rubric || {
-            title: extractedTitle,
-            courseName: extractedCourse,
-            assignmentType: 'Research Paper',
-            requiredWordCount: {
-              min: Math.round(currentWordCount * 0.8),
-              max: Math.round(currentWordCount * 1.2),
-              target: currentWordCount || 2000,
-            },
-            requiredCitationStyle: citationStyle,
-            requiredSourceCount: (data.extractedPapers || []).length || 4,
-            topicConstraints: [],
-            keyQuestionsToAnswer: [],
-            formattingRules: ['1-inch margins', 'Standard font', 'Academic citation list'],
-            criteria: [],
-          },
-          references: updatedRefs,
-          outline: [],
-          progressionSteps: nextSteps,
-          createdAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
-        };
-
-        // Save project and update userPapers state so it appears in Past Projects modal immediately
-        await saveProject(savedImportedPaper);
-        const latestPapers = await fetchUserProjects(auth.currentUser?.uid);
-        setUserPapers(latestPapers);
-      }
-    } catch (err) {
-      console.error('Import analysis error:', err);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Document analysis failed.');
+      if (!data.analysis) throw new Error('The analysis response was empty.');
+      const analysis: ImportAnalysisResult = data.analysis;
+      const meta = analysis.titlePageMetadata || {};
+      importedPaper.title = suppliedTitle?.trim() || meta.paperTitle?.trim() || analysis.extractedTitle?.trim() || title;
+      importedPaper.titlePageConfig = { ...importedPaper.titlePageConfig, ...meta, paperTitle: importedPaper.title };
+      if (importedPaper.rubric) importedPaper.rubric = { ...importedPaper.rubric, title: importedPaper.title };
+      importedPaper.references = data.extractedPapers || [];
+      importedPaper.progressionSteps.push({ id: crypto.randomUUID(), timestamp: new Date().toLocaleTimeString(), stage: 'AI Import Analysis', summary: 'Analyzed imported document', details: 'Identified ' + importedPaper.references.length + ' references. Check publication details before citing.' });
+      setImportAnalysisResult(analysis);
+      setExtractedImportPapers(importedPaper.references);
+      setIsAnalysisOpen(true);
+    } catch (error) {
+      alert('Your document was imported and saved on this device, but AI analysis failed: ' + (error instanceof Error ? error.message : 'Please try again.'));
+    } finally {
+      loadPaperIntoWorkspace(importedPaper);
+      setPendingImportText(importedText);
+      setIsImporting(false);
     }
   };
 
@@ -761,6 +676,8 @@ export default function App() {
     const scenario = SAMPLE_ASSIGNMENTS.find((s) => s.id === id);
     if (!scenario) return;
 
+    setCurrentPaperId(crypto.randomUUID());
+    setTitlePageConfig({ ...emptyTitlePage, paperTitle: scenario.rubric.title, courseName: scenario.rubric.courseName || '' });
     setRubric(scenario.rubric);
     setReferences(scenario.samplePapers);
     setContent(scenario.initialDraft);
@@ -845,6 +762,7 @@ export default function App() {
       />
       {/* Studio Header */}
       <Header
+        paperTitle={titlePageConfig.paperTitle}
         rubric={rubric}
         wordCount={wordCount}
         citationStyle={citationStyle}
@@ -860,6 +778,7 @@ export default function App() {
         onStartGuidedTour={() => setRunTour(true)}
         savedPaperCount={userPapers.length}
         isSavingToCloud={isSavingToCloud}
+        saveMessage={saveMessage}
         isProofreading={isProofreading}
         isDarkMode={isDarkMode}
         onToggleDarkMode={handleToggleTheme}
@@ -882,6 +801,7 @@ export default function App() {
         {/* Center Panel: Main Academic Rich Text Editor */}
         <CenterEditor
           content={content}
+          saveMessage={saveMessage}
           onChangeContent={setContent}
           references={references}
           citationStyle={citationStyle}
@@ -942,7 +862,7 @@ export default function App() {
         isOpen={isImportOpen}
         onClose={() => setIsImportOpen(false)}
         onImportAndAnalyze={handleImportDocument}
-        isAnalyzing={isAnalysisOpen}
+        isAnalyzing={isImporting}
       />
 
       <AnalysisModal
@@ -988,6 +908,8 @@ export default function App() {
       />
 
       <ExportModal
+        userId={auth.currentUser?.uid}
+        onChangeContent={setContent}
         isOpen={isExportOpen}
         onClose={() => setIsExportOpen(false)}
         documentContent={content}

@@ -87,5 +87,5 @@ export const AuthWrapper: React.FC<{ children: React.ReactNode }> = ({ children 
     );
   }
 
-  return <>{children}</>;
+  return <React.Fragment key={user.uid}>{children}</React.Fragment>;
 };

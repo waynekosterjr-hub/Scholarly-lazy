@@ -1,13 +1,16 @@
+import { generatePdf } from './src/utils/pdfExport';
 import express from 'express';
 import path from 'path';
 import { createServer as createViteServer } from 'vite';
 import { GoogleGenAI, Type } from '@google/genai';
 import dotenv from 'dotenv';
+import { academicPolicy, academicContext, chooseTaskModel } from './src/lib/academicPolicy';
+import type { DraftSectionResponse, EditorAssistResponse, DocumentTextResponse } from './src/types';
 
-dotenv.config();
+dotenv.config({ path: ['.env.local', '.env'] });
 
 const app = express();
-const PORT = 3000;
+const PORT = Number(process.env.PORT) || 3000;
 
 app.use(express.json({ limit: '25mb' }));
 
@@ -32,6 +35,7 @@ function getAiClient() {
 }
 
 async function generateContentWithRetry(params: any, maxRetries = 3) {
+  params = { ...params, config: { ...params.config, systemInstruction: `${academicPolicy}\n${params.config?.systemInstruction || ''}` } };
   const ai = getAiClient();
   for (let i = 0; i < maxRetries; i++) {
     try {
@@ -52,35 +56,125 @@ async function generateContentWithRetry(params: any, maxRetries = 3) {
 }
 
 // API Routes
+let modelCache: { id: string; name: string }[] = [];
+let modelCacheTime = 0;
+async function availableModels() {
+  if (modelCache.length && Date.now() - modelCacheTime < 300000) return modelCache;
+  const pager = await getAiClient().models.list({ config: { pageSize: 100 } });
+  const models: { id: string; name: string }[] = [];
+  for await (const model of pager) {
+    const id = model.name?.replace(/^models\//, '');
+    if (id?.startsWith('gemini-') && model.supportedActions?.includes('generateContent') && !/image|tts|robotics|computer-use|transcribe|customtools/i.test(id)) {
+      models.push({ id, name: model.displayName || id });
+    }
+  }
+  modelCache = models; modelCacheTime = Date.now();
+  return models;
+}
+app.get('/api/models', async (_req, res) => {
+  try { res.json({ models: await availableModels() }); }
+  catch { res.status(503).json({ error: 'Unable to list models for the configured AI account.' }); }
+});
+app.use('/api', async (req, res, next) => {
+  let model = req.get('X-AI-Model');
+  if (!model) return next();
+  try {
+    if (model === 'auto' || model === 'quality') {
+      model = chooseTaskModel(await availableModels(), model, req.path);
+      req.headers['x-ai-model'] = model;
+      res.set('X-AI-Model', model);
+    }
+    if (!(await availableModels()).some(item => item.id === model)) return res.status(400).json({ error: `The selected model ${model} is not available for this API key. Choose Gemini 3.5 Flash-Lite or another listed Flash model, then retry.` });
+    next();
+  } catch { res.status(503).json({ error: 'Unable to validate the selected AI model. Please retry.' }); }
+});
+
+function describeAiError(error: any, requestedModel?: string) {
+  const rawMessage = String(error?.message || '');
+  const status = Number(error?.status) || 500;
+  const modelMatch = rawMessage.match(/model[:=]\s*([a-z0-9._-]+)/i);
+  const model = requestedModel || modelMatch?.[1] || 'the selected model';
+  const retryMatch = rawMessage.match(/retry(?:Delay| in)[^0-9]*(\d+)/i);
+  const retryText = retryMatch ? ` Try again in about ${retryMatch[1]} seconds, or choose a Flash model.` : ' Choose a Flash or Flash-Lite model and retry.';
+
+  if (/GEMINI_API_KEY/.test(rawMessage)) {
+    return { status: 503, message: 'AI is not configured. Add GEMINI_API_KEY to .env.local and restart the app.' };
+  }
+
+  if (status === 429 || /RESOURCE_EXHAUSTED|quota exceeded|rate-limit|rate limit/i.test(rawMessage)) {
+    return {
+      status: 429,
+      message: `Gemini rejected ${model} because the configured API key is out of quota for that model.${retryText}`,
+    };
+  }
+
+  if (status === 503 || /UNAVAILABLE|high demand|overloaded/i.test(rawMessage)) {
+    return {
+      status: 503,
+      message: `Gemini says ${model} is under high demand right now. Choose a Flash or Flash-Lite model and retry.`,
+    };
+  }
+
+  if (status === 400 || /API key|invalid|permission|not found/i.test(rawMessage)) {
+    return {
+      status: 400,
+      message: `Gemini could not run ${model}. Check that the API key has access to this model, or choose a different model.`,
+    };
+  }
+
+  return { status: 500, message: 'The AI request failed. Try another model or retry in a moment.' };
+}
+
+function sendAiError(res: any, error: any, requestedModel?: string) {
+  const described = describeAiError(error, requestedModel);
+  return res.status(described.status).json({ error: described.message });
+}
+
+app.post('/api/export/pdf', async (req, res) => {
+  const options = req.body;
+  if (typeof options?.title !== 'string' || typeof options?.content !== 'string' || !Array.isArray(options.references) || options.content.length > 500000) {
+    return res.status(400).json({ error: 'A title, document content, and reference list are required.' });
+  }
+  try {
+    const pdf = await generatePdf(options);
+    res.type('application/pdf').send(pdf);
+  } catch (error) {
+    console.error('PDF export failed', error);
+    res.status(500).json({ error: 'Unable to generate PDF. Check the document and retry.' });
+  }
+});
+
 
 // 1. Semantic Scholar API Proxy & Literature Discovery
+let scholarCooldownUntil = 0;
 app.post('/api/scholarly/search', async (req, res) => {
   try {
     const { query, limit = 10, year } = req.body;
-    if (!query || typeof query !== 'string') {
+    if (!query || typeof query !== 'string' || !query.trim()) {
       return res.status(400).json({ error: 'Search query is required' });
     }
 
+    const safeLimit = Math.min(50, Math.max(1, Math.floor(Number(limit) || 10)));
+    if (year && !/^\d{4}(-\d{4})?$/.test(String(year))) return res.status(400).json({ error: 'Year must be YYYY or YYYY-YYYY.' });
     const fields = 'paperId,title,authors,year,abstract,url,citationCount,venue,externalIds';
     let s2Url = `https://api.semanticscholar.org/graph/v1/paper/search?query=${encodeURIComponent(
       query
-    )}&limit=${limit}&fields=${fields}`;
+    )}&limit=${safeLimit}&fields=${fields}`;
 
     if (year) {
       s2Url += `&year=${encodeURIComponent(year)}`;
     }
 
     try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 6500);
-
+      if (Date.now() < scholarCooldownUntil) throw new Error('Semantic Scholar rate-limit cooldown');
       const response = await fetch(s2Url, {
         headers: {
           'User-Agent': 'AcademicResearchStudio/1.0',
+          ...(process.env.SEMANTIC_SCHOLAR_API_KEY ? { 'x-api-key': process.env.SEMANTIC_SCHOLAR_API_KEY } : {}),
         },
-        signal: controller.signal,
+        signal: AbortSignal.timeout(6500),
       });
-      clearTimeout(timeoutId);
+      if (response.status === 429) scholarCooldownUntil = Date.now() + Math.max(60000, (Number(response.headers.get('retry-after')) || 0) * 1000);
 
       if (response.ok) {
         const data = await response.json();
@@ -89,62 +183,49 @@ app.post('/api/scholarly/search', async (req, res) => {
             paperId: p.paperId || `s2-${Math.random().toString(36).substring(2, 9)}`,
             title: p.title || 'Untitled Scholarly Publication',
             authors: (p.authors || []).map((a: any) => ({ name: a.name || 'Anonymous', authorId: a.authorId })),
-            year: p.year || new Date().getFullYear(),
-            abstract: p.abstract || 'Abstract unavailable for this indexed article.',
+            year: p.year || null,
+            abstract: p.abstract || null,
+            source: 'Semantic Scholar',
             url: p.url || (p.externalIds?.DOI ? `https://doi.org/${p.externalIds.DOI}` : undefined),
             citationCount: p.citationCount || 0,
-            venue: p.venue || 'Academic Journal',
+            venue: p.venue || '',
             doi: p.externalIds?.DOI || '',
           }));
           return res.json({ papers, source: 'semantic_scholar_live' });
         }
+        if (Array.isArray(data?.data)) return res.json({ papers: [], source: 'semantic_scholar_live' });
       }
     } catch (fetchErr) {
-      console.warn('Semantic Scholar live fetch failed or timed out, generating peer-reviewed scholarly dataset via Gemini:', fetchErr);
+      console.warn('Semantic Scholar live fetch failed or timed out, no unverified references will be substituted:', fetchErr);
     }
 
-    // Fallback: Use Gemini 3.7 Flash to retrieve legitimate peer-reviewed academic literature and citations
-    const prompt = `You are a scholarly research database indexing real and verifiable peer-reviewed literature for the academic query: "${query}".
-Return a list of 6-8 authentic, well-cited scholarly academic journal articles and seminal studies related to this topic.
-Include realistic authors, publication years, thorough academic abstracts explaining methodology and findings, realistic citation counts, and journal venues.`;
-
-    const fallbackResponse = await generateContentWithRetry({
-      model: 'gemini-3.5-flash',
-      contents: prompt,
-      config: {
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: Type.ARRAY,
-          items: {
-            type: Type.OBJECT,
-            properties: {
-              paperId: { type: Type.STRING },
-              title: { type: Type.STRING },
-              authors: {
-                type: Type.ARRAY,
-                items: {
-                  type: Type.OBJECT,
-                  properties: {
-                    name: { type: Type.STRING },
-                  },
-                  required: ['name'],
-                },
-              },
-              year: { type: Type.INTEGER },
-              abstract: { type: Type.STRING },
-              venue: { type: Type.STRING },
-              citationCount: { type: Type.INTEGER },
-              doi: { type: Type.STRING },
-              url: { type: Type.STRING },
-            },
-            required: ['title', 'authors', 'year', 'abstract', 'venue'],
-          },
-        },
-      },
-    });
-
-    const parsedPapers = JSON.parse(fallbackResponse.text || '[]');
-    return res.json({ papers: parsedPapers, source: 'curated_academic_index' });
+    // Crossref provides publisher-deposited records, never AI-generated references.
+    try {
+      const params = new URLSearchParams({ query: query.trim(), rows: String(safeLimit) });
+      const filters = ['type:journal-article'];
+      if (year) {
+        const [from, to = from] = String(year).split('-');
+        filters.push(`from-pub-date:${from}`, `until-pub-date:${to}`);
+      }
+      params.set('filter', filters.join(','));
+      const response = await fetch(`https://api.crossref.org/works?${params}`, {
+        headers: { 'User-Agent': 'ScholarDesk/1.0' }, signal: AbortSignal.timeout(10000),
+      });
+      if (!response.ok) throw new Error(`Crossref status ${response.status}`);
+      const data = await response.json();
+      if (!Array.isArray(data.message?.items)) throw new Error('Invalid Crossref response');
+      const plain = (text: string) => String(text || '').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+      const papers = data.message.items.filter((p: any) => p.DOI && p.title?.[0]).map((p: any) => ({
+        paperId: `crossref:${p.DOI.toLowerCase()}`, title: plain(p.title[0]),
+        authors: (p.author || []).map((a: any) => ({ name: [a.given, a.family].filter(Boolean).join(' ') || a.name || 'Unknown author' })),
+        year: p.published?.['date-parts']?.[0]?.[0] || null,
+        abstract: p.abstract ? plain(p.abstract) : null,
+        url: `https://doi.org/${p.DOI}`, doi: p.DOI, venue: plain(p['container-title']?.[0]),
+        citationCount: p['is-referenced-by-count'] || 0, source: 'Crossref',
+      }));
+      return res.json({ papers, source: 'crossref_live' });
+    } catch (error) { console.warn('Crossref fallback unavailable:', error); }
+    return res.status(503).json({ error: 'Semantic Scholar and Crossref are temporarily unavailable. Please try again shortly.' });
   } catch (error: any) {
     console.error('Error in /api/scholarly/search:', error);
     res.status(500).json({ error: error.message || 'Failed to search scholarly articles' });
@@ -181,7 +262,7 @@ Instructions:
 - Ensure queries directly reflect key themes in the center draft and rubric criteria.`;
 
     const response = await generateContentWithRetry({
-      model: 'gemini-3.5-flash',
+      model: req.get('X-AI-Model') || 'gemini-3.5-flash-lite',
       contents: prompt,
       config: {
         responseMimeType: 'application/json',
@@ -217,8 +298,8 @@ app.post('/api/rubric/extract', async (req, res) => {
 Extract the exact assignment details, grading rubric breakdown, word count bounds, topic constraints, citation requirements, and evaluation criteria from the provided assignment text or image.
 
 Ensure that:
-1. Criteria weights sum up to 100% (or proportional percentages).
-2. Word count min, max, and recommended targets are identified (default to standard undergraduate/graduate bounds if unspecified, e.g. 1500-2500 words).
+1. Preserve stated criterion weights, converting points proportionally to percentages only when the complete points total is known. Use weight 0 for unspecified weights; do not invent grading criteria.
+2. Extract word count bounds exactly. Use 0 for unspecified bounds or targets, and requiredSourceCount 0 if unspecified. Never substitute standard assignment lengths.
 3. Citation style (APA7, MLA9, CHICAGO, IEEE, HARVARD) is detected.
 4. Key questions and topic constraints are clearly broken down.`;
 
@@ -256,7 +337,7 @@ Ensure that:
     }
 
     const response = await generateContentWithRetry({
-      model: 'gemini-3.5-flash',
+      model: req.get('X-AI-Model') || 'gemini-3.5-flash-lite',
       contents,
       config: {
         systemInstruction: systemPrompt,
@@ -353,7 +434,8 @@ Ensure that:
 // 3. Strategy & Cross-Referencing Engine (Outline Generation)
 app.post('/api/strategy/outline', async (req, res) => {
   try {
-    const { rubric, studentDirection, selectedArticles } = req.body;
+    const { rubric: suppliedRubric, studentDirection, selectedArticles, citationStyle } = req.body;
+    const rubric = { ...suppliedRubric, requiredCitationStyle: citationStyle || suppliedRubric?.requiredCitationStyle };
 
     const articlesSummary = (selectedArticles || [])
       .map(
@@ -384,10 +466,12 @@ Create a rigorous, highly detailed academic paper outline with 4 to 6 main secti
 For each section and subpoint:
 1. Provide a clear academic title and description of the argument.
 2. Explicitly specify which of the Selected Articles (using their paperId) MUST be cross-referenced to support claims or serve as counter-arguments.
-3. Assign target word counts per section that sum up to approximately ${rubric?.requiredWordCount?.target || 2000} words.`;
+3. Assign target word counts per section that sum up to approximately ${rubric?.requiredWordCount?.target || 2000} words (a planning suggestion if no count is supplied).
+4. Adapt section count and structure to the assignment type and length, including short discussion responses. In each point description identify the relevant rubric criterion ID and explain how the point meets it. Cover every criterion and required question. Where evidence is missing, state what the student needs to find; use only supplied paper IDs and leave citedPaperIds empty if none support the point.
+${academicContext(suppliedRubric, selectedArticles)}`;
 
     const response = await generateContentWithRetry({
-      model: 'gemini-3.5-flash',
+      model: req.get('X-AI-Model') || 'gemini-3.5-flash-lite',
       contents: prompt,
       config: {
         responseMimeType: 'application/json',
@@ -429,14 +513,16 @@ For each section and subpoint:
     return res.json({ outline });
   } catch (error: any) {
     console.error('Error in /api/strategy/outline:', error);
-    res.status(500).json({ error: error.message || 'Failed to generate outline' });
+    sendAiError(res, error, req.get('X-AI-Model'));
   }
 });
 
 // 4. Section-by-Section Draft Assistance
 app.post('/api/strategy/draft-section', async (req, res) => {
   try {
-    const { section, rubric, studentDirection, selectedArticles, existingDocumentText } = req.body;
+    const { section, rubric: suppliedRubric, studentDirection, selectedArticles, existingDocumentText, citationStyle } = req.body;
+    const rubric = { ...suppliedRubric, requiredCitationStyle: citationStyle || suppliedRubric?.requiredCitationStyle };
+    if (!section?.heading) return res.status(400).json({ error: "An outline section is required." });
 
     const articlesSummary = (selectedArticles || [])
       .map(
@@ -465,24 +551,28 @@ Instructions:
 1. Write polished, rigorous academic prose for this section.
 2. Embed proper in-text citations according to ${rubric?.requiredCitationStyle || 'APA 7th edition'} format (e.g. (Author, Year) or Author (Year)). Only cite articles from the provided selected articles pool.
 3. Maintain objective scholarly tone, strong topic sentences, and evidence-based analysis.
-4. Return ONLY the drafted prose for this section (with standard paragraph breaks, no markdown meta commentaries).`;
+4. Return ONLY the drafted prose for this section (with standard paragraph breaks, no markdown meta commentaries). Include explicit [Evidence needed: ...] markers wherever support is missing.
+5. Address the relevant grading criteria and required questions. Use a claim, supplied evidence, analysis, and connection to the thesis. Avoid padding, invented findings, and repeating the existing draft.
+${academicContext(suppliedRubric, selectedArticles)}`;
 
     const response = await generateContentWithRetry({
-      model: 'gemini-3.5-flash',
+      model: req.get('X-AI-Model') || 'gemini-3.5-flash-lite',
       contents: prompt,
     });
 
-    return res.json({ draftContent: response.text || '' });
+    return res.json({ draftContent: response.text || '' } satisfies DraftSectionResponse);
   } catch (error: any) {
     console.error('Error in /api/strategy/draft-section:', error);
-    res.status(500).json({ error: error.message || 'Failed to draft section' });
+    sendAiError(res, error, req.get('X-AI-Model'));
   }
 });
 
 // 5. Strict Academic Professor Proofreading & Rubric Grading
 app.post('/api/proofread/review', async (req, res) => {
+  const requestedModel = req.get('X-AI-Model') || 'gemini-3.5-flash-lite';
   try {
-    const { documentText, rubric, selectedArticles } = req.body;
+    const { documentText, rubric: suppliedRubric, selectedArticles, citationStyle } = req.body;
+    const rubric = { ...suppliedRubric, requiredCitationStyle: citationStyle || suppliedRubric?.requiredCitationStyle };
 
     if (!documentText || documentText.trim().length < 50) {
       return res.status(400).json({ error: 'Document text is too short for comprehensive academic review' });
@@ -493,9 +583,9 @@ Evaluate this student's paper against the exact grading rubric, word count const
 
 Rubric Information:
 - Assignment Title: ${rubric?.title || 'Academic Paper'}
-- Required Word Count Range: ${rubric?.requiredWordCount?.min || 1500} - ${rubric?.requiredWordCount?.max || 2500} words (Target: ${rubric?.requiredWordCount?.target || 2000})
+- Required Word Count: minimum ${rubric?.requiredWordCount?.min || 'not specified'}, maximum ${rubric?.requiredWordCount?.max || 'not specified'}, target ${rubric?.requiredWordCount?.target || 'not specified'}
 - Citation Style: ${rubric?.requiredCitationStyle || 'APA7'}
-- Required Source Count: ${rubric?.requiredSourceCount || 4}
+- Required Source Count: ${rubric?.requiredSourceCount || 'not specified'}
 - Criteria Breakdown:
 ${(rubric?.criteria || []).map((c: any) => `- [${c.id}] ${c.category} (${c.weight}%): ${c.description}. Guidelines: ${(c.guidelines || []).join(', ')}`).join('\n')}
 
@@ -512,12 +602,13 @@ Perform a comprehensive academic review:
 1. Grade each rubric criterion objectively, giving score obtained out of the max weight percentage, with specific feedback and status ('fulfilled', 'partially_met', 'unmet').
 2. Calculate overall numerical score (0 to 100) and letter grade (A+, A, A-, B+, B, B-, C+, C, D, F).
 3. Identify top strengths and critical weaknesses.
-4. Extract all in-text citations found in the document, verifying whether they adhere to APA/specified style and whether they reference real scholarly papers.
+4. Extract in-text citations and assess style. paperFound means a match in the supplied library only, never independent verification. In notes distinguish library matches from claim support; explicitly say full text was not verified. Do not assert a source is real from memory.
 5. Provide actionable, high-priority suggestions with exact locations and concrete revisions.
-6. Analyze word count against the required bounds.`;
+6. Analyze word count against supplied bounds only. Do not penalize unspecified requirements. Label the grade provisional. Quote evidence from the draft for each criterion, and identify the precise change needed to improve it. Prioritize missing rubric requirements, unsupported claims, and evidence gaps before style. Do not equate fluent prose with strong scholarship.
+${academicContext(suppliedRubric, selectedArticles)}`;
 
     const response = await generateContentWithRetry({
-      model: 'gemini-3.5-flash',
+      model: requestedModel,
       contents: prompt,
       config: {
         responseMimeType: 'application/json',
@@ -593,17 +684,46 @@ Perform a comprehensive academic review:
     });
 
     const feedback = JSON.parse(response.text || '{}');
+    const criteria = suppliedRubric?.criteria || [];
+    feedback.rubricAdherence = criteria.map((criterion: any) => {
+      const row = (feedback.rubricAdherence || []).find((item: any) => item.criterionId === criterion.id);
+      const maxScore = Math.max(0, Number(criterion.weight) || 0);
+      return { ...row, criterionId: criterion.id, criterionTitle: criterion.category, maxScore,
+        scoreObtained: Math.min(maxScore, Math.max(0, Number(row?.scoreObtained) || 0)),
+        status: row?.status || 'unmet', feedback: row?.feedback || 'This criterion was not evaluated. Review it against the draft.' };
+    });
+    const totalWeight = criteria.reduce((sum: number, c: any) => sum + (Number(c.weight) || 0), 0);
+    const scored = criteria.length > 0 && criteria.every((c: any) => Number(c.weight) > 0);
+    feedback.overallScore = scored ? Math.round(100 * feedback.rubricAdherence.reduce((sum: number, c: any) => sum + c.scoreObtained, 0) / totalWeight) : 0;
+    feedback.letterGrade = scored ? (feedback.overallScore >= 90 ? 'A' : feedback.overallScore >= 80 ? 'B' : feedback.overallScore >= 70 ? 'C' : feedback.overallScore >= 60 ? 'D' : 'F') : 'Not scored';
+    const currentWords = documentText.trim().split(/\s+/u).length;
+    const bounds = suppliedRubric?.requiredWordCount;
+    feedback.wordCountAnalysis = {
+      currentWords,
+      targetWords: bounds?.target || 0,
+      status: bounds?.min > 0 && currentWords < bounds.min ? 'too_short' : bounds?.max > 0 && currentWords > bounds.max ? 'too_long' : 'within_range',
+      recommendation: bounds?.min > 0 || bounds?.max > 0
+        ? 'Count includes all submitted text, including headings and references. Check the instructor’s counting rules.'
+        : 'No word count bounds supplied; no length requirement was assessed.',
+    };
+    const knownTitles = new Set((selectedArticles || []).map((a: any) => String(a.title || '').trim().toLowerCase()));
+    feedback.citationChecks = (feedback.citationChecks || []).map((check: any) => ({
+      ...check,
+      paperFound: Boolean(check.paperFound && check.paperTitle && knownTitles.has(check.paperTitle.trim().toLowerCase())),
+      notes: `${check.notes || ''} Full-text claim support has not been independently verified.`,
+    }));
     return res.json({ feedback });
   } catch (error: any) {
     console.error('Error in /api/proofread/review:', error);
-    res.status(500).json({ error: error.message || 'Failed to proofread document' });
+    sendAiError(res, error, requestedModel);
   }
 });
 
 // 6. Inline Writing Assistant (Academic Enhancements)
 app.post('/api/editor/assist', async (req, res) => {
+  const requestedModel = req.get('X-AI-Model') || 'gemini-3.5-flash-lite';
   try {
-    const { action, selectedText, fullDocument, citationStyle, references } = req.body;
+    const { action, selectedText, fullDocument, citationStyle, references, rubric } = req.body;
 
     let prompt = '';
     const refsList = (references || [])
@@ -627,15 +747,42 @@ app.post('/api/editor/assist', async (req, res) => {
         prompt = `Improve the clarity and academic strength of this paragraph:\n\n"${selectedText}"`;
     }
 
+    prompt += `\n\nUse the following surrounding document only for context: ${(fullDocument || '').slice(0, 4000)}\nReturn ONLY one revised passage, ready to replace the selection. Do not include alternatives, explanations, headings, or a list of changes. Preserve the student's claims; do not invent citations or sources.`;
+
     const response = await generateContentWithRetry({
-      model: 'gemini-3.5-flash',
-      contents: prompt,
+      model: requestedModel,
+      contents: prompt + academicContext(rubric, references),
     });
 
-    return res.json({ result: response.text || '' });
+    return res.json({ result: response.text || '' } satisfies EditorAssistResponse);
   } catch (error: any) {
     console.error('Error in /api/editor/assist:', error);
-    res.status(500).json({ error: error.message || 'Failed to process editor assistance' });
+    sendAiError(res, error, requestedModel);
+  }
+});
+
+// Extract actual document text rather than converting a paper into assignment criteria.
+app.post('/api/document/extract-text', async (req, res) => {
+  try {
+    const { imageBase64, imageMimeType, pdfBase64 } = req.body;
+    const encoded = pdfBase64 || imageBase64;
+    if (typeof encoded !== 'string' || !encoded) return res.status(400).json({ error: 'A PDF or image is required.' });
+    const mimeType = pdfBase64 ? 'application/pdf' : imageMimeType;
+    if (!['application/pdf', 'image/png', 'image/jpeg', 'image/webp'].includes(mimeType)) {
+      return res.status(400).json({ error: 'Use a PDF, PNG, JPEG, or WebP document.' });
+    }
+    const response = await generateContentWithRetry({
+      model: req.get('X-AI-Model') || 'gemini-3.5-flash-lite',
+      contents: [{ role: 'user', parts: [
+        { text: 'Transcribe all readable document text in reading order, preserving paragraphs, headings, and references. Do not summarize, evaluate, or invent missing text. Return only the document transcription.' },
+        { inlineData: { mimeType, data: encoded.includes(',') ? encoded.slice(encoded.indexOf(',') + 1) : encoded } },
+      ] }],
+    });
+    const text = response.text?.trim();
+    if (!text) return res.status(422).json({ error: 'No readable text was found in the document.' });
+    return res.json({ text } satisfies DocumentTextResponse);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Could not extract document text.' });
   }
 });
 
@@ -689,7 +836,7 @@ Tasks:
 4. Overall Evaluation: Executive summary, key strengths, critical gaps, immediate actionable recommendations, and estimated grade band.`;
 
     const response = await generateContentWithRetry({
-      model: 'gemini-3.5-flash',
+      model: req.get('X-AI-Model') || 'gemini-3.5-flash-lite',
       contents: prompt,
       config: {
         responseMimeType: 'application/json',
